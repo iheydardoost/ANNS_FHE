@@ -1,0 +1,21 @@
+{
+    "dataset": {
+        "path": "../dataset/siftsmall/siftsmall_base.fvecs",
+        "dimension": 128,
+        "models_output_dir": "../dataset/siftsmall_IVFPQ_models/",
+        "encoding_output_dir": "../dataset/siftsmall_IVFPQ_encoded/"
+    },
+    "ivf": {
+        "n_list": 32,
+        "max_iter": 100,
+        "seed": 42,
+        "tolerance": 1e-5
+    },
+    "pq": {
+        "m_subvectors": 8,
+        "k_subcentroids": 256,
+        "max_iter": 100,
+        "seed": 42,
+        "tolerance": 1e-5
+    }
+}
