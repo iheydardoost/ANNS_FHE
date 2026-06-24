@@ -2,3 +2,6 @@
 /venv/
 /__pycache__/
 
+software_golden_model/.venv/
+software_golden_model/venv/
+software_golden_model/__pycache__/
