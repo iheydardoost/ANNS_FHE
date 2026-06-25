@@ -7,8 +7,9 @@ class IVFPQSearcher:
     Handles Asymmetric Distance Computation (ADC) queries over an IVF-PQ index
     and calculates validation metrics (Recall@K).
     """
-    def __init__(self, models_dir: str, index_dir: str, m_subvectors: int):
+    def __init__(self, models_dir: str, index_dir: str, m_subvectors: int, k_subcentroids: int):
         self.m_subvectors = m_subvectors
+        self.k_subcentroids = k_subcentroids
         
         # Load Preprocessing Artifacts
         self.ivf_centroids = np.load(os.path.join(models_dir, "ivf_centroids.npy"))
@@ -48,8 +49,8 @@ class IVFPQSearcher:
         # Build ADC Distance Lookup Tables for this query
         # Since the residual space is defined relative to each coarse centroid,
         # we compute a query residual vector (q - c_i) and its lookup table for each probed cluster.
-        # Shape of lookup_tables: (len(target_clusters), m_subvectors, 256)
-        lookup_tables = np.zeros((len(target_clusters), self.m_subvectors, 256), dtype=np.float32)
+        # Shape of lookup_tables: (len(target_clusters), m_subvectors, k_subcentroids)
+        lookup_tables = np.zeros((len(target_clusters), self.m_subvectors, self.k_subcentroids), dtype=np.float32)
         
         for idx, cluster_id in enumerate(target_clusters):
             centroid = self.ivf_centroids[cluster_id]

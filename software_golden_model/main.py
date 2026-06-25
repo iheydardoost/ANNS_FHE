@@ -52,7 +52,9 @@ def encode_dataset():
     print(f"Loaded dataset matrix dimensions: {X.shape}\n")
     
     # Initialize encoder using saved parameters from the "models" directory
-    encoder = IVFPQEncoder(models_dir=config_mgr.dataset.models_output_dir, m_subvectors=config_mgr.pq.m_subvectors)
+    encoder = IVFPQEncoder(models_dir=config_mgr.dataset.models_output_dir,
+                            m_subvectors=config_mgr.pq.m_subvectors,
+                            k_subcentroids=config_mgr.pq.k_subcentroids)
     
     # Encode
     ivf_assignments, pq_codes = encoder.encode_dataset(X)
@@ -88,7 +90,8 @@ def test_query(top_k: int):
     # Instantiate Searcher
     searcher = IVFPQSearcher(models_dir=config_mgr.dataset.models_output_dir,
                              index_dir=config_mgr.dataset.encoding_output_dir,
-                             m_subvectors=config_mgr.pq.m_subvectors)
+                             m_subvectors=config_mgr.pq.m_subvectors,
+                             k_subcentroids=config_mgr.pq.k_subcentroids)
     
     # Execute queries using IVF-PQ ADC
     print(f"\nRunning IVF-PQ ADC search (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries...")
