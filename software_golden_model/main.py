@@ -67,7 +67,10 @@ def encode_dataset():
     
     # Save raw binaries for C++ core
     ivf_assignments.astype(np.int32).tofile(os.path.join(config_mgr.dataset.encoding_output_dir, "ivf_assignments.bin"))
-    pq_codes.astype(np.uint8).tofile(os.path.join(config_mgr.dataset.encoding_output_dir, "pq_codes.bin"))
+    if config_mgr.pq.k_subcentroids <= 256:
+        pq_codes.astype(np.uint8).tofile(os.path.join(config_mgr.dataset.encoding_output_dir, "pq_codes.bin"))
+    else:
+        pq_codes.astype(np.uint16).tofile(os.path.join(config_mgr.dataset.encoding_output_dir, "pq_codes.bin"))
     
     print("\n--- Encoding Population Summary ---")
     print(f"IVF Assignments Array Shape: {ivf_assignments.shape} (Dtype: {ivf_assignments.dtype})")

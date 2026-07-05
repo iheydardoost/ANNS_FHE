@@ -97,6 +97,17 @@ Key parameters inside [`config.json`]:
 
 ---
 
+### 🗃️ Dynamic uint16 PQ Indices Support ($K_{\text{pq}} > 256$)
+
+To support larger and higher-precision Product Quantization codebooks where the number of subcentroids ($K_{\text{pq}}$ / `k_subcentroids`) exceeds $256$ (up to $65,535$), the pipeline automatically upgrades codebook indexing storage from 1-byte `uint8` to 2-byte `uint16`:
+*   **Python Encoder & Serialization**: Automatically resolves the required type based on $K_{\text{pq}}$ configuration. If $K_{\text{pq}} \le 256$, `pq_codes.bin` is serialized as `uint8` for storage efficiency; if $K_{\text{pq}} > 256$, it is written as `uint16`.
+*   **C++ Core Database Loader**: Inspects `k_subcentroids` inside `load_data()` to dynamically read the binary database index:
+    *   For $K_{\text{pq}} \le 256$: Reads file as 8-bit bytes and assigns them to the internal `uint16_t` C++ array.
+    *   For $K_{\text{pq}} > 256$: Reads 16-bit elements directly from the binary data stream.
+    *   This dynamic widening keeps all critical distance calculation kernels unified under a single type (`uint16_t`) with zero runtime conversion penalty.
+
+---
+
 ### 🚀 Usage
 
 Execute the pipeline stages sequentially from the `software_golden_model/` directory using [`main.py`]:
@@ -183,11 +194,15 @@ The pipeline employs a dynamic dual-parallelization strategy optimized for each 
 
 ### ⚠️ FHE Memory Footprint Warning & Safety Guard
 
-*   **Memory Overhead**: Fully Homomorphic Encryption operations under CKKS are extremely memory-intensive. Each active search thread instantiates an independent OpenFHE cryptocontext, public/eval keys, and ciphertext arrays, requiring approximately **4 GB of physical RAM** per active thread.
-*   **OOM Scaling Math**: If the number of probed clusters (`n_probe`) is set to 32, querying a single vector in parallel across all 32 candidate clusters would require:
-    $$\text{Memory} = 32 \text{ clusters} \times 4 \text{ GB/thread} = 128 \text{ GB of RAM}$$
-    This massive footprint easily causes Out-Of-Memory (OOM) kernel crashes on typical development environments.
-*   **Safety Guard**: To prevent OOM crashes, a safety guard cap is enforced in the pipeline that limits `n_probe` to a maximum of **4** when running parallel FHE queries.
+*   **Memory Overhead**: Fully Homomorphic Encryption operations under CKKS are extremely memory-intensive. Each active search thread instantiates its own OpenFHE cryptocontext, public/evaluation keys, and ciphertext arrays.
+*   **OOM Scaling Math**: The memory footprint of the Query Distance Lookup Table (LUT) scales dynamically with the number of probed clusters ($n_{\text{probe}}$), subspace count ($M$), and subcentroids count ($K_{\text{pq}}$):
+    $$\text{Ciphertexts Count} = n_{\text{probe}} \times M \times K_{\text{pq}}$$
+    At $N=16384$ ring dimension, each ciphertext consumes $\approx 2 \text{ MB}$. For $M=8$:
+    *   If $K_{\text{pq}}=256$: Each coarse probe consumes $\approx 4 \text{ GB}$ of RAM. Probing 32 clusters requires $128 \text{ GB}$ of RAM.
+    *   If $K_{\text{pq}}=1024$: Each coarse probe consumes $\approx 16 \text{ GB}$ of RAM. Probing just 2 clusters requires $32 \text{ GB}$ of RAM.
+*   **Dynamic Safety Guard**: To prevent the host system from lock-ups or kernel OOM crashes, a dynamic safety check is enforced in `main.cpp` that calculates the estimated memory consumption before running homomorphic queries:
+    $$\text{Memory (GB)} = \frac{n_{\text{probe}} \times M \times K_{\text{pq}} \times 2.0}{1024.0}$$
+    If the estimated memory footprint exceeds **32.0 GB**, the C++ core terminates immediately with an informative error message.
 
 ---
 

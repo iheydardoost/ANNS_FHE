@@ -25,7 +25,7 @@ private:
     std::vector<float> m_centroids;       // Shape: (n_list, dimension)
     std::vector<float> m_codebooks;       // Shape: (m_subvectors, k_subcentroids, sub_dim)
     std::vector<int32_t> m_assignments;   // Shape: (num_vectors)
-    std::vector<uint8_t> m_pq_codes;      // Shape: (num_vectors, m_subvectors)
+    std::vector<uint16_t> m_pq_codes;      // Shape: (num_vectors, m_subvectors)
 
     int m_n_list = 0;
     int m_dimension = 0;

@@ -38,9 +38,29 @@ bool FHESearcher::load_data(const FHEConfig& config) {
 
     if (!load_bin(centroids_path, m_centroids) ||
         !load_bin(codebooks_path, m_codebooks) ||
-        !load_bin(assignments_path, m_assignments) ||
-        !load_bin(codes_path, m_pq_codes)) {
+        !load_bin(assignments_path, m_assignments)) {
         return false;
+    }
+
+    // Load m_pq_codes based on subcentroids count
+    {
+        std::ifstream file(codes_path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open binary file: " << codes_path << std::endl;
+            return false;
+        }
+        size_t file_size = file.tellg();
+        file.seekg(0, std::ios::beg);
+
+        if (m_k_subcentroids <= 256) {
+            std::vector<uint8_t> temp_codes(file_size);
+            file.read(reinterpret_cast<char*>(temp_codes.data()), file_size);
+            m_pq_codes.assign(temp_codes.begin(), temp_codes.end());
+        } else {
+            size_t num_elements = file_size / sizeof(uint16_t);
+            m_pq_codes.resize(num_elements);
+            file.read(reinterpret_cast<char*>(m_pq_codes.data()), file_size);
+        }
     }
 
     m_num_vectors = m_assignments.size();
@@ -209,11 +229,11 @@ std::vector<std::pair<int, float>> FHESearcher::search(
         int cid = m_assignments[idx];
         int lp = centroid_to_local[cid];
         
-        uint8_t code_0 = m_pq_codes[idx * m_m_subvectors + 0];
+        uint16_t code_0 = m_pq_codes[idx * m_m_subvectors + 0];
         auto sum = lut[lp * m_m_subvectors * m_k_subcentroids + 0 * m_k_subcentroids + code_0];
         
         for (int m = 1; m < m_m_subvectors; ++m) {
-            uint8_t code_m = m_pq_codes[idx * m_m_subvectors + m];
+            uint16_t code_m = m_pq_codes[idx * m_m_subvectors + m];
             auto term = lut[lp * m_m_subvectors * m_k_subcentroids + m * m_k_subcentroids + code_m];
             sum = cc->EvalAdd(sum, term);
         }

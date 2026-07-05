@@ -210,13 +210,12 @@ int main(int argc, char* argv[]) {
 
     } else {
         // --- ENCRYPTED FHE MODE ---
-        if (config.n_probe > 4) {
-            std::cerr << "ERROR: 'n_probe' is set to " << config.n_probe 
-                      << " in config.json with homomorphic encryption enabled." << std::endl;
-            std::cerr << "Each probe requires evaluating and storing 2,048 ciphertexts (~4 GB of RAM per probe)." << std::endl;
-            std::cerr << "Running with n_probe=" << config.n_probe 
-                      << " would require approx. " << (config.n_probe * 4) << " GB of RAM, causing system memory exhaustion." << std::endl;
-            std::cerr << "To prevent system freezing, please reduce 'n_probe' to <= 4 in config.json, or disable encryption ('use_encryption': false)." << std::endl;
+        double est_ram = (static_cast<double>(config.n_probe) * config.m_subvectors * config.k_subcentroids * 2.0) / 1024.0;
+        if (est_ram > 32.0) {
+            std::cerr << "ERROR: The requested search configuration is unsafe with homomorphic encryption enabled." << std::endl;
+            std::cerr << "Estimated LUT memory usage: " << est_ram << " GB (exceeds safety limit of 32 GB)." << std::endl;
+            std::cerr << "LUT Ciphertexts count: " << (config.n_probe * config.m_subvectors * config.k_subcentroids) << std::endl;
+            std::cerr << "To prevent system freezing/crashing, please reduce n_probe, k_subcentroids, or m_subvectors in config.json, or disable encryption." << std::endl;
             return 1;
         }
 

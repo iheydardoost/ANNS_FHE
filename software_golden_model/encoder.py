@@ -71,7 +71,7 @@ class IVFPQEncoder:
             sub_distances_sq = np.clip(r_sq + code_sq - 2 * np.dot(res_subspace, codebook_subspace.T), a_min=0, a_max=None)
             
             # Save the closest sub-centroid index
-            pq_codes[:, m] = np.argmin(sub_distances_sq, axis=1).astype(np.uint8)
+            pq_codes[:, m] = np.argmin(sub_distances_sq, axis=1).astype(data_type)
             
         print("✓ IVF-PQ encoding complete.")
         return ivf_assignments, pq_codes
