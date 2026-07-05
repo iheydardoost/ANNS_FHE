@@ -20,5 +20,18 @@
         "max_iter": 100,
         "seed": 42,
         "tolerance": 1e-5
+    },
+    "encryption": {
+        "enabled": true,
+        "use_encryption": true,
+        "scheme": "CKKS",
+        "poly_modulus_degree": 16384,
+        "coeff_modulus_bits": [60, 40, 40, 40, 40, 40, 40, 60],
+        "scale_bits": 40,
+        "security_level": "HEStd_128_classic",
+        "n_probe": 2,
+        "interactive_top_k": true,
+        "sign_approx_method": "composition",
+        "composition_iterations": 3
     }
 }

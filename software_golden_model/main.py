@@ -65,13 +65,17 @@ def encode_dataset():
     np.save(os.path.join(config_mgr.dataset.encoding_output_dir, "ivf_assignments.npy"), ivf_assignments)
     np.save(os.path.join(config_mgr.dataset.encoding_output_dir, "pq_codes.npy"), pq_codes)
     
+    # Save raw binaries for C++ core
+    ivf_assignments.astype(np.int32).tofile(os.path.join(config_mgr.dataset.encoding_output_dir, "ivf_assignments.bin"))
+    pq_codes.astype(np.uint8).tofile(os.path.join(config_mgr.dataset.encoding_output_dir, "pq_codes.bin"))
+    
     print("\n--- Encoding Population Summary ---")
     print(f"IVF Assignments Array Shape: {ivf_assignments.shape} (Dtype: {ivf_assignments.dtype})")
     print(f"PQ Compressed Codes Shape:  {pq_codes.shape} (Dtype: {pq_codes.dtype})")
     print(f"Total Database Storage: {pq_codes.nbytes / 1024:.2f} KB (Down from raw vectors size!)")
 
 
-def test_query(top_k: int):
+def test_query(top_k: int, batch_mode: bool = False, jobs: int = 1, num_queries: int = 10):
     # Initialize configuration manager using script-relative config.json
     config_mgr = get_config_manager()
 
@@ -84,30 +88,120 @@ def test_query(top_k: int):
     
     # Load ground truth
     ground_truth = query_loader.load_groundtruth(config_mgr.dataset.groundtruth_path)
+
+    # Slice dataset to query limit if requested
+    if num_queries > 0 and len(X_query) > num_queries:
+        X_query = X_query[:num_queries]
+        ground_truth = ground_truth[:num_queries]
     
-    n_probe = config_mgr.ivf.n_list
+    encryption_config = config_mgr.raw_config.get("encryption", {})
+    encryption_enabled = encryption_config.get("enabled", False)
     
-    # Instantiate Searcher
-    searcher = IVFPQSearcher(models_dir=config_mgr.dataset.models_output_dir,
-                             index_dir=config_mgr.dataset.encoding_output_dir,
-                             m_subvectors=config_mgr.pq.m_subvectors,
-                             k_subcentroids=config_mgr.pq.k_subcentroids)
-    
-    # Execute queries using IVF-PQ ADC
-    print(f"\nRunning IVF-PQ ADC search (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries...")
-    pq_predictions = []
-    
-    for q in X_query:
-        pred_ids, _ = searcher.query(q, n_probe=n_probe, top_k=top_k)
-        # Pad with dummy values if candidate pool returned fewer items than top_k
-        if len(pred_ids) < top_k:
-            pred_ids = np.pad(pred_ids, (0, top_k - len(pred_ids)), constant_values=-1)
-        pq_predictions.append(pred_ids)
+    if encryption_enabled:
+        n_probe = encryption_config.get("n_probe", 4)
+        from fhe_wrapper import FHESearcherWrapper
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, "config.json")
+        wrapper = FHESearcherWrapper(config_path)
         
-    pq_predictions = np.array(pq_predictions)
+        use_encryption = encryption_config.get("use_encryption", True)
+        
+        if batch_mode:
+            if use_encryption:
+                print(f"\nRunning C++ FHE ANNS search in PARALLEL SUBPROCESS mode (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries with jobs={jobs}...")
+                print(f"   (Bypassing OpenFHE multi-threading memory contention and allocator locks by spawning independent single-query subprocesses)")
+                
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                import time
+                
+                pq_predictions_list = [None] * len(X_query)
+                latencies = [0.0] * len(X_query)
+                
+                start_time = time.perf_counter()
+                
+                def run_one_query(q_idx):
+                    pred_ids, latency_report = wrapper.search(query_idx=q_idx, top_k=top_k)
+                    try:
+                        lat_val = float(latency_report.split()[0])
+                    except Exception:
+                        lat_val = 0.0
+                    return q_idx, pred_ids, lat_val
+                
+                with ThreadPoolExecutor(max_workers=jobs) as executor:
+                    futures = [executor.submit(run_one_query, i) for i in range(len(X_query))]
+                    for future in as_completed(futures):
+                        q_idx, pred_ids, lat_val = future.result()
+                        if len(pred_ids) < top_k:
+                            pred_ids = np.pad(pred_ids, (0, top_k - len(pred_ids)), constant_values=-1)
+                        pq_predictions_list[q_idx] = pred_ids[:top_k]
+                        latencies[q_idx] = lat_val
+                        
+                end_time = time.perf_counter()
+                total_latency = (end_time - start_time) * 1000.0
+                avg_active = np.mean(latencies) if latencies else 0.0
+                throughput = total_latency / len(X_query)
+                
+                pq_predictions = np.array(pq_predictions_list)
+                
+                print(f"✓ Total Execution Time (Wall-clock, parallel subprocesses): {total_latency:.2f} ms")
+                print(f"✓ Average Query Active Computation Time (Isolated):          {avg_active:.2f} ms")
+                print(f"✓ Effective Query Latency (Throughput-based):                 {throughput:.2f} ms")
+            else:
+                print(f"\nRunning C++ FHE ANNS search in BATCH mode (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries with jobs={jobs}...")
+                ordered_pred_ids, total_latency, avg_active, throughput = wrapper.search_batch(top_k=top_k, jobs=jobs, limit=num_queries)
+                
+                pq_predictions = []
+                for pred_ids in ordered_pred_ids:
+                    if len(pred_ids) < top_k:
+                        pred_ids = np.pad(pred_ids, (0, top_k - len(pred_ids)), constant_values=-1)
+                    pq_predictions.append(pred_ids[:top_k])
+                pq_predictions = np.array(pq_predictions)
+                
+                print(f"✓ Total C++ Core Batch Execution Time (Wall-clock): {total_latency:.2f} ms")
+                print(f"✓ Average Query Active Computation Time (Isolated):   {avg_active:.2f} ms")
+                print(f"✓ Effective Query Latency (Throughput-based):         {throughput:.2f} ms")
+        else:
+            print(f"\nRunning C++ FHE ANNS search in SINGLE-QUERY mode (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries...")
+            pq_predictions = []
+            latencies = []
+            
+            for i in range(len(X_query)):
+                pred_ids, latency_report = wrapper.search(query_idx=i, top_k=top_k)
+                if len(pred_ids) < top_k:
+                    pred_ids = np.pad(pred_ids, (0, top_k - len(pred_ids)), constant_values=-1)
+                pq_predictions.append(pred_ids[:top_k])
+                
+                try:
+                    lat_val = float(latency_report.split()[0])
+                    latencies.append(lat_val)
+                except Exception:
+                    pass
+                    
+            pq_predictions = np.array(pq_predictions)
+            avg_latency = np.mean(latencies) if latencies else 0.0
+            print(f"✓ Average C++ Core Query Latency: {avg_latency:.2f} ms")
+    else:
+        n_probe = config_mgr.ivf.n_list
+        # Instantiate Searcher
+        searcher = IVFPQSearcher(models_dir=config_mgr.dataset.models_output_dir,
+                                 index_dir=config_mgr.dataset.encoding_output_dir,
+                                 m_subvectors=config_mgr.pq.m_subvectors,
+                                 k_subcentroids=config_mgr.pq.k_subcentroids)
+        
+        # Execute queries using IVF-PQ ADC
+        print(f"\nRunning IVF-PQ ADC search (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries...")
+        pq_predictions = []
+        
+        for q in X_query:
+            pred_ids, _ = searcher.query(q, n_probe=n_probe, top_k=top_k)
+            if len(pred_ids) < top_k:
+                pred_ids = np.pad(pred_ids, (0, top_k - len(pred_ids)), constant_values=-1)
+            pq_predictions.append(pred_ids)
+            
+        pq_predictions = np.array(pq_predictions)
     
     # Calculate Recall@K accuracy validation metric
-    recall_score = searcher.evaluate_recall(ground_truth, pq_predictions, k=top_k)
+    recall_score = IVFPQSearcher.evaluate_recall(ground_truth, pq_predictions, k=top_k)
     
     # Calculate individual recall to report richer statistics
     individual_recalls = []
@@ -169,6 +263,26 @@ def main():
         help="specify top-k value for query search (default: 8)"
     )
     
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="run queries in batch mode to measure true C++ latency without OS process/IO overhead"
+    )
+    
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=1,
+        help="number of parallel threads to use in C++ batch mode (default: 1)"
+    )
+    
+    parser.add_argument(
+        "-n", "--num_queries",
+        type=int,
+        default=10,
+        help="maximum number of queries to test (default: 10). Set to -1 to run all queries."
+    )
+    
     args = parser.parse_args()
     
     if args.function == "create_models":
@@ -176,7 +290,7 @@ def main():
     elif args.function == "encode_dataset":
         encode_dataset()
     elif args.function == "test_query":
-        test_query(args.top_k)
+        test_query(args.top_k, args.batch, args.jobs, args.num_queries)
     else:
         print("Invalid function choice")
         sys.exit(1)
