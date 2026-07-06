@@ -235,7 +235,7 @@ def test_query(top_k: int, batch_mode: bool = False, jobs: int = 1, num_queries:
     # Print sample query diagnostics
     print("\nSample Query Diagnostics:")
     print("------------------------------------------------------------")
-    for i in range(min(5, len(X_query))):
+    for i in range(min(20, len(X_query))):
         true_neighbors = list(ground_truth[i, :top_k])
         pred_neighbors = list(pq_predictions[i, :top_k])
         matches = set(true_neighbors).intersection(set(pred_neighbors))

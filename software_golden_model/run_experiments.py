@@ -141,7 +141,7 @@ def main():
         # 3. Test queries for all top_k values
         for top_k in TOP_K_VALUES:
             print(f"   -> Querying top_k={top_k}...")
-            stdout = run_command([main_abs, "test_query", "--top_k", str(top_k)])
+            stdout = run_command([main_abs, "test_query", "--top_k", str(top_k), "-n", "-1", "--batch", "-j", "4"])
             
             # Parse metrics from stdout
             mean_rec, std_rec, min_rec, max_rec = parse_metrics(stdout)

@@ -97,8 +97,9 @@ std::vector<std::pair<int, float>> PlaintextSearcher::search(
     std::sort(coarse_distances.begin(), coarse_distances.end(), 
               [](const auto& a, const auto& b) { return a.second < b.second; });
 
+    int actual_probes = std::min(n_probe, m_n_list);
     std::unordered_set<int> probed_centroids;
-    for (int p = 0; p < n_probe; ++p) {
+    for (int p = 0; p < actual_probes; ++p) {
         probed_centroids.insert(coarse_distances[p].first);
     }
 
@@ -123,7 +124,7 @@ std::vector<std::pair<int, float>> PlaintextSearcher::search(
         centroid_to_local[cid] = local_idx++;
     }
 
-    std::vector<float> lut(n_probe * m_m_subvectors * m_k_subcentroids, 0.0f);
+    std::vector<float> lut(actual_probes * m_m_subvectors * m_k_subcentroids, 0.0f);
     
     for (int cid : probed_centroids) {
         int l_cid = centroid_to_local[cid];

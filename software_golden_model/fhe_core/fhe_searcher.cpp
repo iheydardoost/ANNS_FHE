@@ -158,8 +158,9 @@ std::vector<std::pair<int, float>> FHESearcher::search(
     std::sort(coarse_dists_dec.begin(), coarse_dists_dec.end(),
               [](const auto& a, const auto& b) { return a.second < b.second; });
 
+    int actual_probes = std::min(n_probe, m_n_list);
     std::unordered_set<int> probed_centroids;
-    for (int p = 0; p < n_probe; ++p) {
+    for (int p = 0; p < actual_probes; ++p) {
         probed_centroids.insert(coarse_dists_dec[p].first);
     }
 
@@ -178,7 +179,7 @@ std::vector<std::pair<int, float>> FHESearcher::search(
     // Map probed centroids to local index [0...n_probe-1]
     std::vector<int> centroid_to_local(m_n_list, -1);
     int local_idx = 0;
-    std::vector<int> local_to_centroid(n_probe);
+    std::vector<int> local_to_centroid(actual_probes);
     for (int cid : probed_centroids) {
         centroid_to_local[cid] = local_idx;
         local_to_centroid[local_idx] = cid;
@@ -186,11 +187,11 @@ std::vector<std::pair<int, float>> FHESearcher::search(
     }
 
     // 4. Compute PQ Distance Lookup Tables (LUT) homomorphically
-    // Table shape: n_probe * m_subvectors * k_subcentroids
-    std::vector<Ciphertext<DCRTPoly>> lut(n_probe * m_m_subvectors * m_k_subcentroids);
+    // Table shape: actual_probes * m_subvectors * k_subcentroids
+    std::vector<Ciphertext<DCRTPoly>> lut(actual_probes * m_m_subvectors * m_k_subcentroids);
 
     #pragma omp parallel for collapse(3)
-    for (int lp = 0; lp < n_probe; ++lp) {
+    for (int lp = 0; lp < actual_probes; ++lp) {
         for (int m = 0; m < m_m_subvectors; ++m) {
             for (int k = 0; k < m_k_subcentroids; ++k) {
                 int cid = local_to_centroid[lp];
