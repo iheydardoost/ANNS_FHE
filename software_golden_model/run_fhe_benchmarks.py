@@ -18,9 +18,11 @@ NUM_QUERIES = 10
 # ==============================================================================
 
 # Paths
-config_path = "D:/iman_heydardoost/master/thesis/ANNS_FHE/software_golden_model/config.json"
-main_path = "D:/iman_heydardoost/master/thesis/ANNS_FHE/software_golden_model/main.py"
-output_image_dir = "D:/iman_heydardoost/master/thesis/reports/template_report/thesis_progress_report_1/content/images"
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.abspath(os.path.join(script_dir, "config.json"))
+main_path = os.path.abspath(os.path.join(script_dir, "main.py"))
+output_image_dir = os.path.abspath(os.path.join(script_dir, "../../reports/template_report/thesis_progress_report_1/content/images"))
+summary_json_path = os.path.abspath(os.path.join(script_dir, "../../results/fhe_experiment_summary.json"))
 os.makedirs(output_image_dir, exist_ok=True)
 
 # Helper to run python script with UTF-8 encoding
@@ -190,7 +192,7 @@ def main():
         "plaintext": {f"{k[0]}_{k[1]}": v for k, v in plaintext_results.items()},
         "encrypted": {f"{k[0]}_{k[1]}": v for k, v in encrypted_results.items()}
     }
-    with open("D:/iman_heydardoost/master/thesis/results/fhe_experiment_summary.json", "w") as f:
+    with open(summary_json_path, "w") as f:
         json.dump(results_data, f, indent=4)
 
     # ==================== PLOTTING GRAPHS ====================

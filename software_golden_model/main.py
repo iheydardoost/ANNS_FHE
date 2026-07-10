@@ -146,9 +146,9 @@ def test_query(top_k: int, batch_mode: bool = False, jobs: int = 1, num_queries:
                 
                 pq_predictions = np.array(pq_predictions_list)
                 
-                print(f"✓ Total Execution Time (Wall-clock, parallel subprocesses): {total_latency:.2f} ms")
-                print(f"✓ Average Query Active Computation Time (Isolated):          {avg_active:.2f} ms")
-                print(f"✓ Effective Query Latency (Throughput-based):                 {throughput:.2f} ms")
+                print(f"[OK] Total Execution Time (Wall-clock, parallel subprocesses): {total_latency:.2f} ms")
+                print(f"[OK] Average Query Active Computation Time (Isolated):          {avg_active:.2f} ms")
+                print(f"[OK] Effective Query Latency (Throughput-based):                 {throughput:.2f} ms")
             else:
                 print(f"\nRunning C++ FHE ANNS search in BATCH mode (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries with jobs={jobs}...")
                 ordered_pred_ids, total_latency, avg_active, throughput = wrapper.search_batch(top_k=top_k, jobs=jobs, limit=num_queries)
@@ -160,9 +160,9 @@ def test_query(top_k: int, batch_mode: bool = False, jobs: int = 1, num_queries:
                     pq_predictions.append(pred_ids[:top_k])
                 pq_predictions = np.array(pq_predictions)
                 
-                print(f"✓ Total C++ Core Batch Execution Time (Wall-clock): {total_latency:.2f} ms")
-                print(f"✓ Average Query Active Computation Time (Isolated):   {avg_active:.2f} ms")
-                print(f"✓ Effective Query Latency (Throughput-based):         {throughput:.2f} ms")
+                print(f"[OK] Total C++ Core Batch Execution Time (Wall-clock): {total_latency:.2f} ms")
+                print(f"[OK] Average Query Active Computation Time (Isolated):   {avg_active:.2f} ms")
+                print(f"[OK] Effective Query Latency (Throughput-based):         {throughput:.2f} ms")
         else:
             print(f"\nRunning C++ FHE ANNS search in SINGLE-QUERY mode (n_probe={n_probe}, top_k={top_k}) over {len(X_query)} test queries...")
             pq_predictions = []
@@ -182,7 +182,7 @@ def test_query(top_k: int, batch_mode: bool = False, jobs: int = 1, num_queries:
                     
             pq_predictions = np.array(pq_predictions)
             avg_latency = np.mean(latencies) if latencies else 0.0
-            print(f"✓ Average C++ Core Query Latency: {avg_latency:.2f} ms")
+            print(f"[OK] Average C++ Core Query Latency: {avg_latency:.2f} ms")
     else:
         n_probe = config_mgr.ivf.n_list
         # Instantiate Searcher

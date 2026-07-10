@@ -45,7 +45,7 @@ class SiftDataLoader:
             # Reshape and strip out the leading dimension integers
             dataset = raw_data.reshape(num_vectors, record_length)[:, 1:]
             
-            print(f"✓ Successfully loaded {num_vectors} vectors with dimension {detected_dim}.")
+            print(f"[OK] Successfully loaded {num_vectors} vectors with dimension {detected_dim}.")
             return dataset
 
         except Exception as e:
@@ -82,7 +82,7 @@ class SiftDataLoader:
             # Reshape and strip out the leading dimension integers
             dataset = raw_data.reshape(num_vectors, record_length)[:, 1:]
             
-            print(f"✓ Successfully loaded {num_vectors} groundtruth vectors with dimension {detected_dim}.")
+            print(f"[OK] Successfully loaded {num_vectors} groundtruth vectors with dimension {detected_dim}.")
             return dataset
 
         except Exception as e:

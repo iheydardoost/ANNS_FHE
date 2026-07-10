@@ -15,7 +15,7 @@ def save_preprocessing_artifacts(ivf_centroids: np.ndarray, pq_codebooks: np.nda
     ivf_centroids.astype(np.float32).tofile(os.path.join(output_dir, "ivf_centroids.bin"))
     pq_codebooks.astype(np.float32).tofile(os.path.join(output_dir, "pq_codebooks.bin"))
     
-    print(f"✓ Saved IVF centroids to {ivf_path} and .bin format")
-    print(f"✓ Saved PQ codebooks to {pq_path} and .bin format")
+    print(f"[OK] Saved IVF centroids to {ivf_path} and .bin format")
+    print(f"[OK] Saved PQ codebooks to {pq_path} and .bin format")
 
 

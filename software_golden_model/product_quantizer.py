@@ -64,7 +64,7 @@ class ProductQuantizer:
             sub_centroids = self._run_subspace_kmeans(X_subspace, m, sub_dim)
             self.codebooks[m] = sub_centroids
 
-        print("\n✓ PQ Codebooks successfully trained.")
+        print("\n[OK] PQ Codebooks successfully trained.")
         return self.codebooks
 
     def _run_subspace_kmeans(self, X_sub: np.ndarray, subspace_idx: int, sub_dim: int) -> np.ndarray:
@@ -105,7 +105,7 @@ class ProductQuantizer:
                     new_sub_centroids[i] = X_sub[np.random.choice(num_vectors)]
 
             if np.allclose(sub_centroids, new_sub_centroids, atol=1e-5):
-                print(f"      ✓ Converged early at iteration {iteration + 1}. Final Subspace WCSS: {current_wcss:.2f}")
+                print(f"      [OK] Converged early at iteration {iteration + 1}. Final Subspace WCSS: {current_wcss:.2f}")
                 break
                 
             sub_centroids = new_sub_centroids

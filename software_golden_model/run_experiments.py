@@ -9,10 +9,9 @@ import itertools
 # ==============================================================================
 # CONFIGURATION CONSTANTS (Set these as needed)
 # ==============================================================================
-# Absolute or relative paths to files
-CONFIG_PATH = "D:/iman_heydardoost/master/thesis/ANNS_FHE/software_golden_model/config.json"
-MAIN_PATH = "D:/iman_heydardoost/master/thesis/ANNS_FHE/software_golden_model/main.py"
-OUTPUT_CSV_PATH = "D:/iman_heydardoost/master/thesis/results/siftsmall_ivfpq_experiment_results.csv"
+CONFIG_PATH = "config.json"
+MAIN_PATH = "main.py"
+OUTPUT_CSV_PATH = "../../results/siftsmall_ivfpq_experiment_results.csv"
 
 # Parameter combinations to test
 IVF_N_LIST = [4, 8, 16, 32, 64, 128, 256]

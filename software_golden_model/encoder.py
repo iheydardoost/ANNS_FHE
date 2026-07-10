@@ -38,11 +38,11 @@ class IVFPQEncoder:
         distances_sq = np.clip(X_sq + c_sq - 2 * np.dot(X, self.ivf_centroids.T), a_min=0, a_max=None)
         
         ivf_assignments = np.argmin(distances_sq, axis=1).astype(np.int32)
-        print("✓ Coarse IVF assignments complete.")
+        print("[OK] Coarse IVF assignments complete.")
 
         # Compute Residuals
         residuals = X - self.ivf_centroids[ivf_assignments]
-        print("✓ Residuals calculated.")
+        print("[OK] Residuals calculated.")
 
         # Quantize residuals into PQ codes
         # Use proper data_type
@@ -73,5 +73,5 @@ class IVFPQEncoder:
             # Save the closest sub-centroid index
             pq_codes[:, m] = np.argmin(sub_distances_sq, axis=1).astype(data_type)
             
-        print("✓ IVF-PQ encoding complete.")
+        print("[OK] IVF-PQ encoding complete.")
         return ivf_assignments, pq_codes

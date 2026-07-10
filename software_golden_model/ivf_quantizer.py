@@ -73,12 +73,12 @@ class IVFCoarseQuantizer:
 
             # Check for convergence (if centroids stop moving)
             if np.allclose(self.centroids, new_centroids, atol=self.tolerance):
-                print(f"✓ K-Means converged early at iteration {iteration + 1}.")
+                print(f"[OK] K-Means converged early at iteration {iteration + 1}.")
                 break
                 
             self.centroids = new_centroids
 
-        print("✓ IVF Centroids successfully generated.")
+        print("[OK] IVF Centroids successfully generated.")
         return self.centroids
 
 

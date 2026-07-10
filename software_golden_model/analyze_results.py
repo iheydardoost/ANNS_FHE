@@ -4,8 +4,9 @@ import matplotlib.pyplot as plt
 import os
 
 # Define paths
-csv_path = "D:/iman_heydardoost/master/thesis/results/siftsmall_ivfpq_experiment_results.csv"
-output_image_dir = "D:/iman_heydardoost/master/thesis/reports/template_report/thesis_progress_report_1/content/images"
+script_dir = os.path.dirname(os.path.abspath(__file__))
+csv_path = os.path.abspath(os.path.join(script_dir, "../../results/siftsmall_ivfpq_experiment_results.csv"))
+output_image_dir = os.path.abspath(os.path.join(script_dir, "../../reports/template_report/thesis_progress_report_1/content/images"))
 os.makedirs(output_image_dir, exist_ok=True)
 
 # Load the experiment results

@@ -60,4 +60,4 @@ class IVFPQConfigManager:
                 f"Dataset dimension ({self.dataset.dimension}) must be perfectly "
                 f"divisible by the number of PQ subvectors ({self.pq.m_subvectors})."
             )
-        print("✓ Configuration successfully loaded and validated.")
+        print("[OK] Configuration successfully loaded and validated.")

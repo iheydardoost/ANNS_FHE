@@ -48,7 +48,7 @@ class IVFPQPreprocessor:
         
         # Subtract assigned centroid from each vector
         residuals = X - self.ivf_centroids[closest_centroid_ids]
-        print("✓ Residual vectors successfully calculated.")
+        print("[OK] Residual vectors successfully calculated.")
         print("")
 
         # Train PQ codebooks strictly on these computed residuals
