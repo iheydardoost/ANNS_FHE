@@ -78,9 +78,7 @@ This generates the C++ core binary (`fhe_core.exe` on Windows) which is used by 
     "encryption": {
         "enabled": true,
         "use_encryption": true,
-        "scheme": "CKKS",
         "poly_modulus_degree": 16384,
-        "coeff_modulus_bits": [60, 40, 40, 40, 40, 40, 40, 60],
         "scale_bits": 40,
         "security_level": "HEStd_128_classic",
         "n_probe": 2,
