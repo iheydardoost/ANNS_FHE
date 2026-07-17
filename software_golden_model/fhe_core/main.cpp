@@ -1,369 +1,558 @@
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <string>
-#include <fstream>
-#include <stdexcept>
-#include <filesystem>
-#include <thread>
-#include <atomic>
-#include <omp.h>
+/**
+ * FHE-Core — Encrypted IVF-PQ Approximate Nearest Neighbor Search
+ *
+ * Usage:
+ *   fhe_core_bin preprocess <config.json>
+ *       Offline: generate keys, encrypt centroids/codebooks, serialize to disk.
+ *
+ *   fhe_core_bin search <config.json> [query_idx] [top_k] [-j <threads>] [-n <num_queries>]
+ *       Online: load serialized keys + encrypted index, run encrypted search.
+ *       query_idx = -1 → batch mode (all queries)
+ *       top_k defaults to config.encryption.top_k
+ */
+
 #include "fhe_config.h"
 #include "fhe_context_manager.h"
-#include "plaintext_searcher.h"
 #include "fhe_searcher.h"
+#include "plaintext_searcher.h"
+#include "thread_pool.h"
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <chrono>
+#include <algorithm>
+#include <numeric>
+#include <cstdlib>
+#include <filesystem>
+#include <mutex>
+#include <atomic>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 using namespace anns_fhe;
-using namespace lbcrypto;
+namespace fs = std::filesystem;
 
-// Helper to load all SIFT query vectors from an fvecs file
-std::vector<std::vector<float>> load_all_query_vectors(const std::string& path, int expected_dim)
+// ---------------------------------------------------------------------------
+// Utility: Read .fvecs file (SIFT format: dim(int32), then dim floats per row)
+// ---------------------------------------------------------------------------
+static std::vector<std::vector<float>> read_fvecs(const std::string& path)
 {
-    std::ifstream file(path, std::ios::binary);
-    if(!file.is_open())
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open())
     {
-        throw std::runtime_error("Could not open query file: " + path);
+        std::cerr << "Error: Cannot open: " << path << std::endl;
+        return {};
     }
-
-    std::vector<std::vector<float>> queries;
-    while(true)
+    std::vector<std::vector<float>> vecs;
+    int32_t dim = 0;
+    while (f.read(reinterpret_cast<char*>(&dim), sizeof(int32_t)))
     {
-        int dim = 0;
-        file.read(reinterpret_cast<char*>(&dim), sizeof(int));
-        if(file.eof() || file.fail())
-        {
-            break;
-        }
-        if(dim != expected_dim)
-        {
-            throw std::runtime_error("Dimension mismatch in query file.");
-        }
-        std::vector<float> query(expected_dim);
-        file.read(reinterpret_cast<char*>(query.data()), expected_dim * sizeof(float));
-        if(file.fail())
-        {
-            throw std::runtime_error("Failed to read query vector data.");
-        }
-        queries.push_back(query);
+        std::vector<float> v(dim);
+        f.read(reinterpret_cast<char*>(v.data()), dim * sizeof(float));
+        vecs.push_back(std::move(v));
     }
-    return queries;
+    return vecs;
 }
 
-std::vector<float> load_query_vector(const std::string& path, int query_idx, int expected_dim)
+// ---------------------------------------------------------------------------
+// Utility: Read .ivecs file (same layout as .fvecs but int32 values)
+// ---------------------------------------------------------------------------
+static std::vector<std::vector<int32_t>> read_ivecs(const std::string& path)
 {
-    std::ifstream file(path, std::ios::binary);
-    if(!file.is_open())
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open())
     {
-        throw std::runtime_error("Could not open query file: " + path);
+        std::cerr << "Error: Cannot open: " << path << std::endl;
+        return {};
     }
-
-    size_t record_bytes = (expected_dim + 1) * sizeof(float);
-    file.seekg(query_idx * record_bytes, std::ios::beg);
-    if(file.fail())
+    std::vector<std::vector<int32_t>> vecs;
+    int32_t dim = 0;
+    while (f.read(reinterpret_cast<char*>(&dim), sizeof(int32_t)))
     {
-        throw std::runtime_error("Seek failed. Query index might be out of range: " + std::to_string(query_idx));
+        std::vector<int32_t> v(dim);
+        f.read(reinterpret_cast<char*>(v.data()), dim * sizeof(int32_t));
+        vecs.push_back(std::move(v));
     }
-
-    int dim = 0;
-    file.read(reinterpret_cast<char*>(&dim), sizeof(int));
-    if(file.fail() || dim != expected_dim)
-    {
-        throw std::runtime_error("Dimension mismatch in query file.");
-    }
-
-    std::vector<float> query(expected_dim);
-    file.read(reinterpret_cast<char*>(query.data()), expected_dim * sizeof(float));
-    if(file.fail())
-    {
-        throw std::runtime_error("Failed to read query vector data.");
-    }
-    return query;
+    return vecs;
 }
 
-void dump_ciphertext_rns(const Ciphertext<DCRTPoly>& ct, const std::string& filepath)
+// ---------------------------------------------------------------------------
+// Compute Recall@K from results vs. ground truth
+// ---------------------------------------------------------------------------
+static double compute_recall(
+    const std::vector<std::pair<int, float>>& results,
+    const std::vector<int32_t>& gt,
+    int top_k)
 {
-    std::ofstream out(filepath);
-    if(!out.is_open())
+    int hits = 0;
+    for (int i = 0; i < top_k && i < static_cast<int>(results.size()); ++i)
     {
-        std::cerr << "Warning: Could not write test vector file: " << filepath << std::endl;
-        return;
+        int found = results[i].first;
+        for (int g : gt)
+            if (g == found) { ++hits; break; }
     }
-    const auto& elements = ct->GetElements();
-    for(size_t poly_idx = 0; poly_idx < elements.size(); ++poly_idx)
-    {
-        const auto& poly = elements[poly_idx];
-        out << "c" << poly_idx << " degree=" << poly.GetRingDimension() << std::endl;
-        size_t num_towers = poly.GetNumOfElements();
-        for(size_t tower_idx = 0; tower_idx < num_towers; ++tower_idx)
-        {
-            const auto& single_poly = poly.GetElementAtIndex(tower_idx);
-            out << "tower=" << tower_idx << " modulus=" << single_poly.GetModulus() << std::endl;
-            for(usint i = 0; i < single_poly.GetLength(); ++i)
-            {
-                out << single_poly[i].ConvertToInt() << " ";
-            }
-            out << std::endl;
-        }
-    }
+    return static_cast<double>(hits) / std::max(1, top_k);
 }
 
-int main(int argc, char* argv[])
+// ---------------------------------------------------------------------------
+// Print results in the same format as the original fhe_core
+// ---------------------------------------------------------------------------
+static void print_results(
+    const std::vector<std::pair<int, float>>& results,
+    int query_idx)
 {
-    if(argc < 4)
+    std::cout << "RESULTS " << query_idx << ":";
+    for (const auto& [idx, dist] : results)
+        std::cout << " " << idx;
+    std::cout << std::endl;
+}
+
+static void print_latency(double coarse_ms, double fine_ms, int query_idx)
+{
+    std::cout << "LATENCY " << query_idx << ":"
+              << " coarse=" << coarse_ms << "ms"
+              << " fine=" << fine_ms << "ms"
+              << " total=" << (coarse_ms + fine_ms) << "ms" << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// MODE: preprocess
+// ---------------------------------------------------------------------------
+static int mode_preprocess(const FHEConfig& config)
+{
+    std::cout << "\n=== FHE-Core Preprocessing ===" << std::endl;
+    std::cout << "Depth=" << config.multiplicative_depth
+              << "  Slots=" << (config.poly_modulus_degree >> 1)
+              << "  n_list=" << config.n_list
+              << "  M=" << config.m_subvectors
+              << "  K=" << config.k_subcentroids << std::endl;
+
+    FHEContextManager ctx_mgr;
+
+    // 1. Initialize CryptoContext + generate all keys
+    std::cout << "\n[1/4] Initializing CryptoContext and generating keys..." << std::endl;
+    if (!ctx_mgr.init_and_keygen(config))
     {
-        std::cerr << "Usage: " << argv[0] << " <config_json_path> <query_index> <top_k> [-j num_threads] [-n num_queries]" << std::endl;
+        std::cerr << "Error: Key generation failed." << std::endl;
         return 1;
     }
 
-    std::string config_path = argv[1];
-    int query_idx = std::stoi(argv[2]);
-    int top_k = std::stoi(argv[3]);
-    int num_threads = 1;
-    int num_queries = -1;
-
-    for(int i = 4; i < argc; ++i)
+    // 2. Serialize CryptoContext + keys
+    std::cout << "\n[2/4] Serializing CryptoContext and keys..." << std::endl;
+    if (!ctx_mgr.serialize_all(config))
     {
-        if(std::string(argv[i]) == "-j" && i + 1 < argc)
-        {
-            num_threads = std::stoi(argv[i + 1]);
-            ++i;
-        }
-        else if(std::string(argv[i]) == "-n" && i + 1 < argc)
-        {
-            num_queries = std::stoi(argv[i + 1]);
-            ++i;
-        }
-    }
-
-    FHEConfig config;
-    if(!config.load(config_path))
-    {
-        std::cerr << "Error loading configuration." << std::endl;
+        std::cerr << "Error: Serialization failed." << std::endl;
         return 1;
     }
 
-    // Resolve query file path
-    std::string query_filepath = config.resolve_path(config.query_path);
-    std::vector<std::vector<float>> queries;
-    bool is_batch = (query_idx == -1);
-
-    try
+    // 3. Encrypt and serialize IVF centroids
+    std::cout << "\n[3/4] Encrypting IVF centroids..." << std::endl;
+    if (!ctx_mgr.encrypt_and_serialize_centroids(config))
     {
-        if(is_batch)
-        {
-            queries = load_all_query_vectors(query_filepath, config.dimension);
-            if(num_queries > 0 && queries.size() > static_cast<size_t>(num_queries))
-            {
-                queries.resize(num_queries);
-            }
-        }
-        else
-        {
-            queries.push_back(load_query_vector(query_filepath, query_idx, config.dimension));
-        }
-    }
-    catch(const std::exception& e)
-    {
-        std::cerr << "Error loading query: " << e.what() << std::endl;
+        std::cerr << "Error: Centroid encryption failed." << std::endl;
         return 1;
     }
 
-    if(!config.use_encryption)
+    // 4. Encrypt and serialize PQ codebooks
+    std::cout << "\n[4/4] Encrypting PQ codebooks..." << std::endl;
+    if (!ctx_mgr.encrypt_and_serialize_codebooks(config))
     {
-        // --- PLAINTEXT MODE ---
-        PlaintextSearcher searcher;
-        if(!searcher.load_data(config))
+        std::cerr << "Error: Codebook encryption failed." << std::endl;
+        return 1;
+    }
+
+    std::cout << "\n=== Preprocessing complete. Files written to: "
+              << config.resolve_path(config.serialization_dir) << " ===" << std::endl;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// MODE: search (FHE)
+// ---------------------------------------------------------------------------
+static int mode_search_fhe(
+    const FHEConfig& config,
+    int query_idx,   // -1 = all queries
+    int top_k,
+    int jobs,
+    int limit)
+{
+    std::cout << "\n=== FHE-Core Encrypted Search ===" << std::endl;
+
+    // --- Load CryptoContext + keys + encrypted index ---
+    FHEContextManager ctx_mgr;
+    std::cout << "[1/3] Loading serialized keys and encrypted index..." << std::endl;
+    if (!ctx_mgr.load_from_disk(config))
+    {
+        std::cerr << "Error: Failed to load serialized data. Run 'preprocess' first." << std::endl;
+        return 1;
+    }
+
+    // --- Load plaintext data ---
+    FHESearcher searcher;
+    std::cout << "[2/3] Loading plaintext index data (PQ codes, assignments)..." << std::endl;
+    if (!searcher.load_plaintext_data(config))
+    {
+        std::cerr << "Error: Failed to load plaintext data." << std::endl;
+        return 1;
+    }
+
+    // --- Load queries ---
+    std::cout << "[3/3] Loading queries..." << std::endl;
+    const std::string q_path = config.resolve_path(config.query_path);
+    auto queries = read_fvecs(q_path);
+    if (queries.empty())
+    {
+        std::cerr << "Error: No queries loaded from: " << q_path << std::endl;
+        return 1;
+    }
+
+    // --- Load ground truth (for recall validation) ---
+    const std::string gt_path = config.resolve_path(config.groundtruth_path);
+    auto groundtruth = read_ivecs(gt_path);
+
+    // --- Determine query range ---
+    int q_start = 0, q_end = static_cast<int>(queries.size());
+    if (query_idx >= 0)
+    {
+        if (query_idx >= q_end)
         {
-            std::cerr << "Error loading index data for plaintext search." << std::endl;
+            std::cerr << "Error: query_idx " << query_idx
+                      << " out of range [0, " << q_end << ")" << std::endl;
             return 1;
         }
+        q_start = query_idx;
+        q_end   = query_idx + 1;
+    }
+    if (limit > 0 && (q_end - q_start) > limit)
+    {
+        q_end = q_start + limit;
+    }
 
-        std::vector<std::vector<std::pair<int, float>>> all_results(queries.size());
-        std::vector<double> individual_latencies(queries.size(), 0.0);
+#ifdef _OPENMP
+    omp_set_num_threads(1);
+#endif
 
-        auto start = std::chrono::high_resolution_clock::now();
-        if(is_batch && num_threads > 1)
-        {
-            std::atomic<size_t> next_q(0);
-            std::vector<std::jthread> worker_threads;
-            for(int t = 0; t < num_threads; ++t)
-            {
-                worker_threads.emplace_back([&]() {
-                    // Restrict internal OpenMP loops to 1 thread for each query worker thread
-                    omp_set_num_threads(1);
-                    while(true)
-                    {
-                        size_t q = next_q.fetch_add(1);
-                        if(q >= queries.size()) break;
-                        auto q_start = std::chrono::high_resolution_clock::now();
-                        all_results[q] = searcher.search(queries[q], config.n_probe, top_k);
-                        auto q_end = std::chrono::high_resolution_clock::now();
-                        individual_latencies[q] = std::chrono::duration<double, std::milli>(q_end - q_start).count();
-                    }
-                    });
-            }
-            // Clear workers vector to block and join all threads
-            worker_threads.clear();
-        }
-        else
-        {
-            // Sequential execution
-            for(size_t q = 0; q < queries.size(); ++q)
-            {
-                auto q_start = std::chrono::high_resolution_clock::now();
-                all_results[q] = searcher.search(queries[q], config.n_probe, top_k);
-                auto q_end = std::chrono::high_resolution_clock::now();
-                individual_latencies[q] = std::chrono::duration<double, std::milli>(q_end - q_start).count();
-            }
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+    std::cout << "\nRunning " << (q_end - q_start) << " queries, top_k=" << top_k
+              << ", n_probe=" << config.n_probe << " with " << jobs << " threads" << std::endl;
+    std::cout << "==========================================" << std::endl;
 
-        // Print output tokens for python parser
-        if(is_batch)
-        {
-            for(size_t q = 0; q < queries.size(); ++q)
+    // --- Per-query search loop ---
+    using Clock = std::chrono::high_resolution_clock;
+    std::vector<double> total_latencies(q_end - q_start, 0.0);
+    double recall_sum = 0.0;
+    int recall_count  = 0;
+
+    struct FHEQueryResult {
+        std::vector<std::pair<int, float>> results;
+        std::vector<double> timings;
+        double elapsed_ms = 0.0;
+        double recall = 0.0;
+        bool has_recall = false;
+    };
+
+    std::vector<FHEQueryResult> batch_results(q_end - q_start);
+
+    int num_workers = (jobs > 0) ? jobs : 1;
+    anns_fhe::ThreadPool pool(num_workers);
+
+    std::atomic<int> next_query(q_start);
+    std::vector<std::future<void>> futures;
+    futures.reserve(num_workers);
+
+    auto t_start = Clock::now();
+
+    for (int w = 0; w < num_workers; ++w)
+    {
+        futures.push_back(pool.enqueue([&]() {
+            while (true)
             {
-                std::cout << "RESULTS_" << q << ": ";
-                for(size_t i = 0; i < all_results[q].size(); ++i)
+                int qi = next_query.fetch_add(1);
+                if (qi >= q_end) break;
+
+                auto t0 = Clock::now();
+
+                std::vector<double> timings;
+                auto results = searcher.search(ctx_mgr, queries[qi], top_k, config, &timings);
+
+                auto t1 = Clock::now();
+                double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                
+                int idx = qi - q_start;
+                batch_results[idx].results = std::move(results);
+                batch_results[idx].timings = std::move(timings);
+                batch_results[idx].elapsed_ms = elapsed_ms;
+                total_latencies[idx] = elapsed_ms;
+
+                if (!groundtruth.empty() && qi < static_cast<int>(groundtruth.size()))
                 {
-                    std::cout << all_results[q][i].first << ":" << all_results[q][i].second;
-                    if(i < all_results[q].size() - 1) std::cout << ",";
+                    batch_results[idx].recall = compute_recall(batch_results[idx].results, groundtruth[qi], top_k);
+                    batch_results[idx].has_recall = true;
                 }
-                std::cout << std::endl;
             }
-            double sum_latencies = 0.0;
-            for(double l : individual_latencies) sum_latencies += l;
-            double avg_active = sum_latencies / queries.size();
-
-            std::cout << "BATCH_LATENCY: " << elapsed_ms << " ms" << std::endl;
-            std::cout << "AVG_ACTIVE_LATENCY: " << avg_active << " ms" << std::endl;
-            std::cout << "THROUGHPUT_LATENCY: " << (elapsed_ms / queries.size()) << " ms" << std::endl;
-        }
-        else
-        {
-            std::cout << "RESULTS: ";
-            for(size_t i = 0; i < all_results[0].size(); ++i)
-            {
-                std::cout << all_results[0][i].first << ":" << all_results[0][i].second;
-                if(i < all_results[0].size() - 1) std::cout << ",";
-            }
-            std::cout << std::endl;
-            std::cout << "LATENCY: " << elapsed_ms << " ms (Critical search kernels)" << std::endl;
-        }
-
+        }));
     }
-    else
+
+    // Wait for all worker threads to finish
+    for (auto& f : futures)
     {
-        // --- ENCRYPTED FHE MODE ---
-        double est_ram = (static_cast<double>(config.n_probe) * config.m_subvectors * config.k_subcentroids * 2.0) / 1024.0;
-        if(est_ram > 32.0)
-        {
-            std::cerr << "ERROR: The requested search configuration is unsafe with homomorphic encryption enabled." << std::endl;
-            std::cerr << "Estimated LUT memory usage: " << est_ram << " GB (exceeds safety limit of 32 GB)." << std::endl;
-            std::cerr << "LUT Ciphertexts count: " << (config.n_probe * config.m_subvectors * config.k_subcentroids) << std::endl;
-            std::cerr << "To prevent system freezing/crashing, please reduce n_probe, k_subcentroids, or m_subvectors in config.json, or disable encryption." << std::endl;
-            return 1;
-        }
+        f.get();
+    }
 
-        FHEContextManager ctx_mgr;
-        if(!ctx_mgr.init(config))
-        {
-            std::cerr << "Error initializing FHE context." << std::endl;
-            return 1;
-        }
+    auto t_end = Clock::now();
+    double wall_clock_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
-        FHESearcher searcher;
-        if(!searcher.load_data(config))
-        {
-            std::cerr << "Error loading index data for FHE search." << std::endl;
-            return 1;
-        }
+    // Print all results sequentially from the main thread
+    for (int qi = q_start; qi < q_end; ++qi)
+    {
+        int idx = qi - q_start;
+        const auto& qr = batch_results[idx];
+        print_results(qr.results, qi);
 
-        std::vector<std::vector<std::pair<int, float>>> all_results(queries.size());
-        std::vector<double> individual_latencies(queries.size(), 0.0);
-
-        auto start = std::chrono::high_resolution_clock::now();
-        if(is_batch && num_threads > 1)
-        {
-            std::atomic<size_t> next_q(0);
-            std::vector<std::jthread> worker_threads;
-            for(int t = 0; t < num_threads; ++t)
-            {
-                worker_threads.emplace_back([&]() {
-                    // Restrict internal OpenFHE and OpenMP loops to 1 thread to avoid oversubscription
-                    omp_set_num_threads(1);
-                    while(true)
-                    {
-                        size_t q = next_q.fetch_add(1);
-                        if(q >= queries.size()) break;
-                        auto q_start = std::chrono::high_resolution_clock::now();
-                        all_results[q] = searcher.search(ctx_mgr, queries[q], config.n_probe, top_k, config);
-                        auto q_end = std::chrono::high_resolution_clock::now();
-                        individual_latencies[q] = std::chrono::duration<double, std::milli>(q_end - q_start).count();
-                    }
-                    });
-            }
-            // Clear workers vector to block and join all threads
-            worker_threads.clear();
-        }
+        if (qr.timings.size() >= 2)
+            print_latency(qr.timings[0], qr.timings[1], qi);
         else
-        {
-            // Sequential execution
-            for(size_t q = 0; q < queries.size(); ++q)
-            {
-                auto q_start = std::chrono::high_resolution_clock::now();
-                all_results[q] = searcher.search(ctx_mgr, queries[q], config.n_probe, top_k, config);
-                auto q_end = std::chrono::high_resolution_clock::now();
-                individual_latencies[q] = std::chrono::duration<double, std::milli>(q_end - q_start).count();
-            }
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+            std::cout << "LATENCY " << qi << ": total=" << qr.elapsed_ms << "ms" << std::endl;
 
-        // Dump Golden Test Vectors for RTL/HLS validation (Task 1.2.4)
-        std::string vector_dir = config.resolve_path(config.encoding_output_dir + "/golden_vectors");
-        std::filesystem::create_directories(vector_dir);
-
-        auto ct_query = ctx_mgr.encrypt_query(queries[0], config.m_subvectors, config.dimension / config.m_subvectors);
-        if(!ct_query.empty())
+        if (qr.has_recall)
         {
-            dump_ciphertext_rns(ct_query[0], vector_dir + "/query_subvector_0.txt");
+            recall_sum += qr.recall;
+            ++recall_count;
+            std::cout << "RECALL@" << top_k << " query=" << qi
+                      << " : " << qr.recall << std::endl;
         }
+    }
 
-        if(is_batch)
-        {
-            for(size_t q = 0; q < queries.size(); ++q)
-            {
-                std::cout << "RESULTS_" << q << ": ";
-                for(size_t i = 0; i < all_results[q].size(); ++i)
-                {
-                    std::cout << all_results[q][i].first << ":" << all_results[q][i].second;
-                    if(i < all_results[q].size() - 1) std::cout << ",";
-                }
-                std::cout << std::endl;
-            }
-            double sum_latencies = 0.0;
-            for(double l : individual_latencies) sum_latencies += l;
-            double avg_active = sum_latencies / queries.size();
+    // --- Summary statistics ---
+    if (!total_latencies.empty())
+    {
+        double sum_lat = std::accumulate(total_latencies.begin(), total_latencies.end(), 0.0);
+        double avg_lat = sum_lat / total_latencies.size();
+        double min_lat = *std::min_element(total_latencies.begin(), total_latencies.end());
+        double max_lat = *std::max_element(total_latencies.begin(), total_latencies.end());
 
-            std::cout << "BATCH_LATENCY: " << elapsed_ms << " ms" << std::endl;
-            std::cout << "AVG_ACTIVE_LATENCY: " << avg_active << " ms" << std::endl;
-            std::cout << "THROUGHPUT_LATENCY: " << (elapsed_ms / queries.size()) << " ms" << std::endl;
-        }
-        else
-        {
-            std::cout << "RESULTS: ";
-            for(size_t i = 0; i < all_results[0].size(); ++i)
-            {
-                std::cout << all_results[0][i].first << ":" << all_results[0][i].second;
-                if(i < all_results[0].size() - 1) std::cout << ",";
-            }
-            std::cout << std::endl;
-            std::cout << "LATENCY: " << elapsed_ms << " ms (Critical FHE search kernels)" << std::endl;
-            std::cout << "GOLDEN_VECTORS_SAVED: " << vector_dir << std::endl;
-        }
+        std::cout << "\n=== Search Statistics ===" << std::endl;
+        std::cout << "Queries:       " << total_latencies.size() << std::endl;
+        std::cout << "Wall-clock:    " << wall_clock_ms << " ms" << std::endl;
+        std::cout << "Avg latency:   " << avg_lat << " ms" << std::endl;
+        std::cout << "Min latency:   " << min_lat << " ms" << std::endl;
+        std::cout << "Max latency:   " << max_lat << " ms" << std::endl;
+        std::cout << "Throughput:    " << (total_latencies.size() / (wall_clock_ms / 1000.0)) << " queries/sec" << std::endl;
+
+        if (recall_count > 0)
+            std::cout << "Avg Recall@" << top_k << ": "
+                      << (recall_sum / recall_count) << std::endl;
     }
 
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// MODE: search (plaintext — preserved for validation)
+// ---------------------------------------------------------------------------
+static int mode_search_plain(
+    const FHEConfig& config,
+    int query_idx,
+    int top_k,
+    int jobs,
+    int limit)
+{
+    PlaintextSearcher searcher;
+    if (!searcher.load_data(config))
+    {
+        std::cerr << "Error: Failed to load plaintext index." << std::endl;
+        return 1;
+    }
+
+    const std::string q_path = config.resolve_path(config.query_path);
+    auto queries = read_fvecs(q_path);
+    if (queries.empty())
+    {
+        std::cerr << "Error: No queries loaded." << std::endl;
+        return 1;
+    }
+
+    const std::string gt_path = config.resolve_path(config.groundtruth_path);
+    auto groundtruth = read_ivecs(gt_path);
+
+    int q_start = 0, q_end = static_cast<int>(queries.size());
+    if (query_idx >= 0) { q_start = query_idx; q_end = query_idx + 1; }
+    if (limit > 0 && (q_end - q_start) > limit)
+    {
+        q_end = q_start + limit;
+    }
+
+#ifdef _OPENMP
+    omp_set_num_threads(1);
+#endif
+
+    using Clock = std::chrono::high_resolution_clock;
+    std::vector<double> total_latencies(q_end - q_start, 0.0);
+    double recall_sum = 0.0;
+    int recall_count = 0;
+
+    struct PlainQueryResult {
+        std::vector<std::pair<int, float>> results;
+        double elapsed_ms = 0.0;
+        double recall = 0.0;
+        bool has_recall = false;
+    };
+
+    std::vector<PlainQueryResult> batch_results(q_end - q_start);
+
+    int num_workers = (jobs > 0) ? jobs : 1;
+    anns_fhe::ThreadPool pool(num_workers);
+
+    std::atomic<int> next_query(q_start);
+    std::vector<std::future<void>> futures;
+    futures.reserve(num_workers);
+
+    auto t_start = Clock::now();
+
+    for (int w = 0; w < num_workers; ++w)
+    {
+        futures.push_back(pool.enqueue([&]() {
+            anns_fhe::PlaintextScratch scratch;
+            while (true)
+            {
+                int qi = next_query.fetch_add(1);
+                if (qi >= q_end) break;
+
+                auto t0 = Clock::now();
+                auto results = searcher.search(queries[qi], config.n_probe, top_k, scratch);
+                auto t1 = Clock::now();
+                double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                
+                int idx = qi - q_start;
+                batch_results[idx].results = std::move(results);
+                batch_results[idx].elapsed_ms = elapsed_ms;
+                total_latencies[idx] = elapsed_ms;
+
+                if (!groundtruth.empty() && qi < static_cast<int>(groundtruth.size()))
+                {
+                    batch_results[idx].recall = compute_recall(batch_results[idx].results, groundtruth[qi], top_k);
+                    batch_results[idx].has_recall = true;
+                }
+            }
+        }));
+    }
+
+    // Wait for all worker threads to finish
+    for (auto& f : futures)
+    {
+        f.get();
+    }
+
+    auto t_end = Clock::now();
+    double wall_clock_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+    // Print all results sequentially from the main thread
+    for (int qi = q_start; qi < q_end; ++qi)
+    {
+        int idx = qi - q_start;
+        const auto& qr = batch_results[idx];
+        print_results(qr.results, qi);
+        std::cout << "LATENCY " << qi << ": total=" << qr.elapsed_ms << "ms" << std::endl;
+
+        if (qr.has_recall)
+        {
+            recall_sum += qr.recall;
+            ++recall_count;
+            std::cout << "RECALL@" << top_k << " query=" << qi
+                      << " : " << qr.recall << std::endl;
+        }
+    }
+
+    if (!total_latencies.empty())
+    {
+        double sum_lat = std::accumulate(total_latencies.begin(), total_latencies.end(), 0.0);
+        double avg_lat = sum_lat / total_latencies.size();
+        double min_lat = *std::min_element(total_latencies.begin(), total_latencies.end());
+        double max_lat = *std::max_element(total_latencies.begin(), total_latencies.end());
+
+        std::cout << "\n=== Search Statistics ===" << std::endl;
+        std::cout << "Queries:       " << total_latencies.size() << std::endl;
+        std::cout << "Wall-clock:    " << wall_clock_ms << " ms" << std::endl;
+        std::cout << "Avg latency:   " << avg_lat << " ms" << std::endl;
+        std::cout << "Min latency:   " << min_lat << " ms" << std::endl;
+        std::cout << "Max latency:   " << max_lat << " ms" << std::endl;
+        std::cout << "Throughput:    " << (total_latencies.size() / (wall_clock_ms / 1000.0)) << " queries/sec" << std::endl;
+    }
+
+    if (recall_count > 0)
+        std::cout << "\nAvg Recall@" << top_k << ": "
+                  << (recall_sum / recall_count) << std::endl;
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[])
+{
+    if (argc < 3)
+    {
+        std::cerr << "Usage:\n"
+                  << "  " << argv[0] << " preprocess <config.json>\n"
+                  << "  " << argv[0] << " search <config.json> [query_idx] [top_k]\n";
+        return 1;
+    }
+
+    const std::string mode       = argv[1];
+    const std::string config_path = argv[2];
+
+    // Load config
+    FHEConfig config;
+    if (!config.load(config_path))
+    {
+        std::cerr << "Error: Failed to load config: " << config_path << std::endl;
+        return 1;
+    }
+
+    // ---- preprocess ----
+    if (mode == "preprocess")
+    {
+        return mode_preprocess(config);
+    }
+
+    // ---- search ----
+    if (mode == "search")
+    {
+        int query_idx = -1;   // -1 = all queries
+        int top_k     = 8;    // default; overridden by CLI arg
+
+        if (argc >= 4) query_idx = std::atoi(argv[3]);
+        if (argc >= 5) top_k     = std::atoi(argv[4]);
+
+        if (top_k <= 0) top_k = 8;
+
+        int jobs  = 1;
+        int limit = -1;
+        for (int i = 5; i < argc; ++i)
+        {
+            if (std::string(argv[i]) == "-j" && i + 1 < argc)
+            {
+                jobs = std::atoi(argv[i + 1]);
+                i++;
+            }
+            else if (std::string(argv[i]) == "-n" && i + 1 < argc)
+            {
+                limit = std::atoi(argv[i + 1]);
+                i++;
+            }
+        }
+
+        // Dispatch to FHE or plaintext mode
+        if (config.use_encryption && config.encryption_enabled)
+            return mode_search_fhe(config, query_idx, top_k, jobs, limit);
+        else
+            return mode_search_plain(config, query_idx, top_k, jobs, limit);
+    }
+
+    std::cerr << "Error: Unknown mode '" << mode
+              << "'. Expected: preprocess | search" << std::endl;
+    return 1;
 }

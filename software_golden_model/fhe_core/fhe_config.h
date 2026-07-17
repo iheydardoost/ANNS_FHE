@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace anns_fhe
 {
@@ -30,10 +31,13 @@ namespace anns_fhe
         int poly_modulus_degree = 16384;
         int scale_bits = 40;
         std::string security_level = "HEStd_128_classic";
-        int n_probe = 4;
-        bool interactive_top_k = true;
-        std::string sign_approx_method = "composition";
-        int composition_iterations = 3;
+        int multiplicative_depth = 40;
+        int n_probe = 2;
+        std::string sign_approx_method = "chebyshev";
+        int chebyshev_degree = 13;
+        int composition_iterations = 3;   // kept for backward compat with "composition" method
+        std::string serialization_dir;
+        double ram_limit_gb = 32.0;
 
         // Load config from JSON file
         bool load(const std::string& filepath);

@@ -86,16 +86,22 @@ namespace anns_fhe
             std::cerr << "Error: PQ codes size mismatch. Got " << m_pq_codes.size() << std::endl;
             return false;
         }
+        m_inverted_lists.clear();
+        m_inverted_lists.resize(m_n_list);
+        for (int i = 0; i < m_num_vectors; ++i)
+        {
+            m_inverted_lists[m_assignments[i]].push_back(i);
+        }
 
         std::cout << "[PlaintextSearcher] Successfully loaded " << m_num_vectors << " vectors from index." << std::endl;
         return true;
     }
 
-    std::vector<std::pair<int, float>> PlaintextSearcher::search(const std::vector<float>& query, int n_probe, int top_k) const
+    std::vector<std::pair<int, float>> PlaintextSearcher::search(const std::vector<float>& query, int n_probe, int top_k, PlaintextScratch& scratch) const
     {
 
         // 1. Coarse Quantization: Find closest n_probe centroids
-        std::vector<std::pair<int, float>> coarse_distances(m_n_list);
+        scratch.coarse_distances.resize(m_n_list);
         for(int i = 0; i < m_n_list; ++i)
         {
             float dist = 0.0f;
@@ -104,30 +110,27 @@ namespace anns_fhe
                 float diff = query[d] - m_centroids[i * m_dimension + d];
                 dist += diff * diff;
             }
-            coarse_distances[i] = { i, dist };
+            scratch.coarse_distances[i] = { i, dist };
         }
 
-        std::sort(coarse_distances.begin(), coarse_distances.end(),
+        std::sort(scratch.coarse_distances.begin(), scratch.coarse_distances.end(),
             [](const auto& a, const auto& b) { return a.second < b.second; });
 
         int actual_probes = std::min(n_probe, m_n_list);
-        std::unordered_set<int> probed_centroids;
+        scratch.probed_centroids.resize(actual_probes);
         for(int p = 0; p < actual_probes; ++p)
         {
-            probed_centroids.insert(coarse_distances[p].first);
+            scratch.probed_centroids[p] = scratch.coarse_distances[p].first;
         }
 
-        // 2. Identify Candidate database IDs in probed clusters
-        std::vector<int> candidates;
-        for(int i = 0; i < m_num_vectors; ++i)
+        // 2. Identify Candidate database IDs in probed clusters using precomputed inverted lists
+        scratch.candidates.clear();
+        for(int cid : scratch.probed_centroids)
         {
-            if(probed_centroids.count(m_assignments[i]))
-            {
-                candidates.push_back(i);
-            }
+            scratch.candidates.insert(scratch.candidates.end(), m_inverted_lists[cid].begin(), m_inverted_lists[cid].end());
         }
 
-        if(candidates.empty())
+        if(scratch.candidates.empty())
         {
             return {};
         }
@@ -135,24 +138,24 @@ namespace anns_fhe
         // 3. Compute ADC Distance Lookup Tables (LUT)
         // Structure: LUT[centroid_idx][subvector_idx][subcentroid_idx]
         // Since we only query probed centroids, we can map centroid_idx to a local index [0...n_probe-1]
-        std::vector<int> centroid_to_local(m_n_list, -1);
+        scratch.centroid_to_local.assign(m_n_list, -1);
         int local_idx = 0;
-        for(int cid : probed_centroids)
+        for(int cid : scratch.probed_centroids)
         {
-            centroid_to_local[cid] = local_idx++;
+            scratch.centroid_to_local[cid] = local_idx++;
         }
 
-        std::vector<float> lut(actual_probes * m_m_subvectors * m_k_subcentroids, 0.0f);
+        scratch.lut.assign(actual_probes * m_m_subvectors * m_k_subcentroids, 0.0f);
 
-        for(int cid : probed_centroids)
+        for(int cid : scratch.probed_centroids)
         {
-            int l_cid = centroid_to_local[cid];
+            int l_cid = scratch.centroid_to_local[cid];
 
             // Compute query residual: q - centroid
-            std::vector<float> q_res(m_dimension);
+            scratch.q_res.resize(m_dimension);
             for(int d = 0; d < m_dimension; ++d)
             {
-                q_res[d] = query[d] - m_centroids[cid * m_dimension + d];
+                scratch.q_res[d] = query[d] - m_centroids[cid * m_dimension + d];
             }
 
             // Compute distances to subcentroids
@@ -167,30 +170,30 @@ namespace anns_fhe
 
                     for(int d = 0; d < m_sub_dim; ++d)
                     {
-                        float diff = q_res[start_col + d] - m_codebooks[cb_offset + d];
+                        float diff = scratch.q_res[start_col + d] - m_codebooks[cb_offset + d];
                         dist += diff * diff;
                     }
 
                     int lut_offset = l_cid * m_m_subvectors * m_k_subcentroids + m * m_k_subcentroids + k;
-                    lut[lut_offset] = dist;
+                    scratch.lut[lut_offset] = dist;
                 }
             }
         }
 
         // 4. Distance aggregation for candidates
-        std::vector<std::pair<int, float>> results(candidates.size());
-        for(size_t i = 0; i < candidates.size(); ++i)
+        std::vector<std::pair<int, float>> results(scratch.candidates.size());
+        for(size_t i = 0; i < scratch.candidates.size(); ++i)
         {
-            int idx = candidates[i];
+            int idx = scratch.candidates[i];
             int cid = m_assignments[idx];
-            int l_cid = centroid_to_local[cid];
+            int l_cid = scratch.centroid_to_local[cid];
 
             float dist = 0.0f;
             for(int m = 0; m < m_m_subvectors; ++m)
             {
                 uint16_t code = m_pq_codes[idx * m_m_subvectors + m];
                 int lut_offset = l_cid * m_m_subvectors * m_k_subcentroids + m * m_k_subcentroids + code;
-                dist += lut[lut_offset];
+                dist += scratch.lut[lut_offset];
             }
             results[i] = { idx, dist };
         }

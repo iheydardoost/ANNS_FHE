@@ -23,13 +23,16 @@
     },
     "encryption": {
         "enabled": true,
-        "use_encryption": true,
+        "use_encryption": false,
         "poly_modulus_degree": 16384,
         "scale_bits": 40,
         "security_level": "HEStd_128_classic",
-        "n_probe": 2,
-        "interactive_top_k": true,
-        "sign_approx_method": "composition",
-        "composition_iterations": 3
+        "multiplicative_depth": 40,
+        "n_probe": 32,
+        "sign_approx_method": "chebyshev",
+        "chebyshev_degree": 13,
+        "composition_iterations": 3,
+        "serialization_dir": "../dataset/siftsmall_fhe_keys/",
+        "ram_limit_gb": 32.0
     }
 }
