@@ -4,6 +4,12 @@ project(fhe_core_bin CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(ENABLE_LOGGING "Enable detailed logging" OFF)
+
+if(ENABLE_LOGGING)
+    add_compile_definitions(ENABLE_LOGGING)
+endif()
+
 # Configure OpenFHE directory
 set(OpenFHE_DIR "C:/OpenFHE/CMake")
 find_package(OpenFHE REQUIRED)
@@ -23,11 +29,17 @@ set(OpenFHE_INCLUDE_DIRS
 
 # ── Own sources include path (warnings ON)
 include_directories(.)
+# openfhe_statistics module
+include_directories(./openfhe_statistics)
 # nlohmann/json single-header (downloaded to third_party/)
 include_directories(third_party)
 
 # Enable OpenMP for parallel distance calculations (optional)
 find_package(OpenMP)
+
+# Recursively find all source and header files in openfhe_statistics
+file(GLOB_RECURSE OPENFHE_STATS_SOURCES "./openfhe_statistics/*.cpp")
+file(GLOB_RECURSE OPENFHE_STATS_HEADERS "./openfhe_statistics/*.h")
 
 # Source files
 set(SOURCES
@@ -36,7 +48,9 @@ set(SOURCES
     plaintext_searcher.cpp
     sign_approximator.cpp
     fhe_searcher.cpp
+    fhe_utility.cpp
     main.cpp
+    ${OPENFHE_STATS_SOURCES}
 )
 
 # Headers (for IDE visibility)
@@ -46,8 +60,10 @@ set(HEADERS
     plaintext_searcher.h
     sign_approximator.h
     fhe_searcher.h
+    fhe_utility.h
     thread_pool.h
     third_party/nlohmann/json.hpp
+    ${OPENFHE_STATS_HEADERS}
 )
 
 # Executable target

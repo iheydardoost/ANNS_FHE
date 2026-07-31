@@ -8,15 +8,11 @@ namespace anns_fhe
 {
 
     /**
-     * SignApproximator: Homomorphic sign/comparison function for HMR.
+     * SignApproximator: Homomorphic sign/comparison and indicator functions for HMR.
      *
-     * Applies an approximate sign function to a ciphertext whose slots contain
-     * values in the range [left_bound, right_bound]. The sign function returns
-     * values in approximately [0, 1]:
-     *   sign(x) ≈ 1  if x > 0  (first element is larger)
-     *   sign(x) ≈ 0  if x < 0  (second element is larger)
-     *
-     * Used in the HMR pairwise comparison step.
+     * Generic, parameterized functions for Chebyshev approximation of:
+     *   1. Step function: sign(x) ≈ 1 if x > 0, 0 if x < 0, 0.5 if x = 0
+     *   2. Indicator function: I(x) ≈ 1 if x < threshold, 0 if x > threshold, 0.5 if x = threshold
      */
     class SignApproximator
     {
@@ -24,30 +20,30 @@ namespace anns_fhe
         SignApproximator() = default;
 
         /**
-         * Evaluate the Chebyshev-approximated sign function on a ciphertext.
-         *
-         * @param cc         CryptoContext (const ref — no deep copy)
-         * @param ct_diff    Encrypted differences (slot_i = val_i - val_j) in [left, right]
-         * @param left_bound Domain left bound for Chebyshev approximation (e.g. -1.0)
-         * @param right_bound Domain right bound (e.g. 1.0)
-         * @param config     FHEConfig containing chebyshev_degree and sign_approx_method
-         * @return           Ciphertext with approximated sign values in [0, 1]
+         * Evaluate Chebyshev-approximated sign function with explicit degree.
          */
         static lbcrypto::Ciphertext<lbcrypto::DCRTPoly> eval_sign(
             const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
             const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_diff,
             double left_bound,
             double right_bound,
-            const FHEConfig& config);
+            uint32_t degree,
+            const double error);
 
         /**
-         * Depth consumed by the sign approximation for a given Chebyshev degree.
-         * Reference: depth2degree mapping from Mazzone et al. (USENIX '25).
-         *   degree  3 → depth 3   (not used)
-         *   degree  5 → depth 4
-         *   degree 13 → depth 5   ← our default
-         *   degree 27 → depth 6
-         *   degree 59 → depth 7
+         * Evaluate Chebyshev-approximated indicator function I(x < threshold).
+         */
+        static lbcrypto::Ciphertext<lbcrypto::DCRTPoly> eval_indicator(
+            const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
+            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_input,
+            double threshold_min,
+            double threshold_max,
+            double left_bound,
+            double right_bound,
+            uint32_t degree);
+
+        /**
+         * Depth consumed by Chebyshev approximation for a given degree.
          */
         static int depth_for_degree(int degree);
     };

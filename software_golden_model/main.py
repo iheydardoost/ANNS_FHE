@@ -155,7 +155,8 @@ def test_query(top_k: int, batch_mode: bool = False, jobs: int = 1, num_queries:
 
             print(f"[OK] Total C++ Core Batch Time (Wall-clock): {total_latency:.2f} ms")
             print(f"[OK] Average Query Active Computation:        {avg_active:.2f} ms")
-            print(f"[OK] Effective Throughput Latency:            {throughput:.2f} queries/sec")
+            print(f"[OK] Effective Throughput:                    {throughput:.2f} queries/sec")
+            print(f"[OK] Effective Throughput Latency:            {total_latency / len(pq_predictions):.2f} ms/query")
         else:
             # Single-query mode
             print(f"\nRunning C++ FHE ANNS in SINGLE-QUERY mode "

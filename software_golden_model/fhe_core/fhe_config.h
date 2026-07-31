@@ -28,13 +28,13 @@ namespace anns_fhe
         // FHE parameters
         bool encryption_enabled = false;
         bool use_encryption = true;
+        std::string pipeline_mode = "MODE_SEQUENTIAL"; // MODE_SEQUENTIAL (depth 15) or MODE_INTERACTIVE (depth 7)
         int poly_modulus_degree = 16384;
         int scale_bits = 40;
         std::string security_level = "HEStd_128_classic";
         int multiplicative_depth = 40;
         int n_probe = 2;
         std::string sign_approx_method = "chebyshev";
-        int chebyshev_degree = 13;
         int composition_iterations = 3;   // kept for backward compat with "composition" method
         std::string serialization_dir;
         double ram_limit_gb = 32.0;

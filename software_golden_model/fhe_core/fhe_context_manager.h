@@ -70,6 +70,14 @@ namespace anns_fhe
 
         bool is_initialized() const { return m_is_initialized; }
 
+        // -----------------------------------------------------------------------
+        // Utility
+        // -----------------------------------------------------------------------
+        static void print_ciphertext_coefficients(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct, usint num_coeffs_to_print);
+
+        void decrypt_and_print_vector(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
+                                        std::string name, usint num_coeffs_to_print, bool print_sorted) const;
+
     private:
         // Compute the full set of rotation key indices needed by the algorithm.
         static std::vector<int32_t> compute_rotation_indices(const FHEConfig& config);

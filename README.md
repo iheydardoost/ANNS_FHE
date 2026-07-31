@@ -36,8 +36,8 @@ Navigate to the core directory and build using CMake:
 cd software_golden_model/fhe_core
 mkdir build
 cd build
-cmake -G "MinGW Makefiles" ..
-cmake --build .
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release
 ```
 This generates the C++ core binary (`fhe_core.exe` on Windows) which is used by the Python pipeline.
 
@@ -174,19 +174,15 @@ This script runs side-by-side performance comparisons of the plaintext search ve
 
 ---
 
-### 🔀 Dual Parallelization Behavior
+### 🔀 Query Parallelization Behavior
 
-The pipeline employs a dynamic dual-parallelization strategy optimized for each operational mode:
+The pipeline employs a unified, high-performance C++ parallel query execution strategy optimized for both Plaintext and FHE search modes inside a single process:
 
-*   **Plaintext Mode (`use_encryption` set to `false`)**:
-    *   Uses a native C++20 thread pool internally inside a single running C++ core process.
-    *   This provides extremely low overhead, cache-locality optimization, and sub-millisecond query evaluation throughput.
-*   **FHE Mode (`use_encryption` set to `true`)**:
-    *   Automatically switches to spawning independent parallel C++ subprocesses managed by Python's thread pool (`concurrent.futures.ThreadPoolExecutor`).
-    *   This avoids performance issues inherent to OpenFHE's concurrency in a single process, such as:
-        *   Memory controller saturation due to massive FHE ciphertext data streams.
-        *   L3 cache thrashing and eviction.
-        *   Global locks within the OpenFHE context allocator.
+*   **Unified C++ Thread Pool**: Spawns a dedicated C++ thread pool with `j` worker threads inside a single running `fhe_core` process. This avoids subprocess spawning overhead and processes queries in parallel.
+*   **Lock-Free Atomic Work-Sharing**: Utilizes a lock-free `std::atomic<int>` query counter to dynamically distribute queries across threads. This minimizes task scheduling overhead to a few nanoseconds and provides perfect load balancing.
+*   **Asynchronous Output Buffering**: Query results and timings are buffered in memory and printed sequentially in sorted order by the main thread after execution, avoiding console I/O mutex contention on the hot path.
+*   **OpenMP Thread Limit**: Restricts internal OpenMP threads inside OpenFHE/Eigen to `1` thread per worker (via `omp_set_num_threads(1)`). This avoids CPU over-subscription and allocator lock bottlenecks, enabling efficient parallel scaling.
+*   **Allocation-Free Plaintext Search**: Utilizes pre-allocated thread-local scratch vectors (`PlaintextScratch`) for plaintext search. Large memory structures (like distance lookup tables) are allocated once at thread startup and reused across queries, eliminating heap-allocator locking.
 
 ---
 

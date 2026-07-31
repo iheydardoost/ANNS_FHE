@@ -66,13 +66,13 @@ namespace anns_fhe
             const auto& enc = j["encryption"];
             if (enc.contains("enabled"))             encryption_enabled   = enc["enabled"].get<bool>();
             if (enc.contains("use_encryption"))      use_encryption       = enc["use_encryption"].get<bool>();
+            if (enc.contains("pipeline_mode"))       pipeline_mode        = enc["pipeline_mode"].get<std::string>();
             if (enc.contains("poly_modulus_degree")) poly_modulus_degree  = enc["poly_modulus_degree"].get<int>();
             if (enc.contains("scale_bits"))          scale_bits           = enc["scale_bits"].get<int>();
             if (enc.contains("security_level"))      security_level       = enc["security_level"].get<std::string>();
             if (enc.contains("multiplicative_depth"))multiplicative_depth = enc["multiplicative_depth"].get<int>();
             if (enc.contains("n_probe"))             n_probe              = enc["n_probe"].get<int>();
             if (enc.contains("sign_approx_method"))  sign_approx_method   = enc["sign_approx_method"].get<std::string>();
-            if (enc.contains("chebyshev_degree"))    chebyshev_degree     = enc["chebyshev_degree"].get<int>();
             if (enc.contains("composition_iterations")) composition_iterations = enc["composition_iterations"].get<int>();
             if (enc.contains("serialization_dir"))   serialization_dir    = enc["serialization_dir"].get<std::string>();
             if (enc.contains("ram_limit_gb"))        ram_limit_gb         = enc["ram_limit_gb"].get<double>();

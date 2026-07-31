@@ -5,6 +5,9 @@
 #include <cmath>
 #include <set>
 #include <algorithm>
+#include <ranges>
+#include "utils-matrices.h"
+#include "fhe_utility.h"
 
 // OpenFHE serialization — must include these AFTER openfhe.h
 #include "pke/cryptocontext-ser.h"
@@ -25,16 +28,31 @@ std::vector<int32_t> FHEContextManager::compute_rotation_indices(const FHEConfig
 {
     std::set<int32_t> idx;
 
-    const int slots = config.poly_modulus_degree >> 1; // N/2 slots
-
-    // By decomposing any arbitrary rotation rot into its binary representation
-    // (rot = sum of +/- (1 << k)), we ONLY need power-of-2 rotation keys.
-    // This reduces the required automorphism keys from ~806 down to ~30!
-    for (int step = 1; step < slots; step *= 2)
+    // 1. Step 1 accumulation reductions (dim 128: 1, 2, 4, 8, 16, 32, 64)
+    std::vector<int> idx_acc;
+    for (int i = 0; i < 7; i++)
     {
-        idx.insert(step);
-        idx.insert(-step);
+        idx_acc.push_back(1 << i); 
     }
+    idx.insert(idx_acc.begin(), idx_acc.end());
+
+    // 2. Mazzone indices for Coarse Centroids (N = 32)
+    auto idx32 = anns_fhe::get_rotation_indices(32);
+    idx.insert(idx32.begin(), idx32.end());
+
+    // 3. Mazzone indices for Candidate Blocks (N = 64)
+    auto idx64 = anns_fhe::get_rotation_indices(64);
+    idx.insert(idx64.begin(), idx64.end());
+
+    #ifdef ENABLE_LOGGING
+    printf("--------------- Rotation indices:\n accumulation reductions: ");
+    for(auto idx_ : idx_acc) printf("%d, ", idx_);
+    printf("\nindices for Coarse Centroids (N = 32): ");
+    for(auto idx_ : idx32) printf("%d, ", idx_);
+    printf("\nindices for Candidate Blocks (N = 64): ");
+    for(auto idx_ : idx64) printf("%d, ", idx_);
+    printf("\n---------------\n");
+    #endif
 
     return std::vector<int32_t>(idx.begin(), idx.end());
 }
@@ -45,9 +63,12 @@ std::vector<int32_t> FHEContextManager::compute_rotation_indices(const FHEConfig
 bool FHEContextManager::init_and_keygen(const FHEConfig& config)
 {
     CCParams<CryptoContextCKKSRNS> parameters;
+    parameters.SetSecretKeyDist(UNIFORM_TERNARY);
     parameters.SetMultiplicativeDepth(config.multiplicative_depth);
     parameters.SetScalingModSize(config.scale_bits);
+    parameters.SetFirstModSize(60);
     parameters.SetBatchSize(config.poly_modulus_degree >> 1);  // N/2 slots
+    parameters.SetKeySwitchTechnique(KeySwitchTechnique::HYBRID);
 
     // Security level
     SecurityLevel secLevel = HEStd_128_classic;
@@ -190,7 +211,7 @@ bool FHEContextManager::encrypt_and_serialize_centroids(const FHEConfig& config)
     }
 
     // Build SIMD slot vector: n_list * dim floats, row-major
-    const int slots = config.poly_modulus_degree >> 1;  // N/2 = 8192
+    const int slots = config.poly_modulus_degree >> 1;  // N/2
     std::vector<double> packed(slots, 0.0);
     for (size_t i = 0; i < num_floats; ++i)
         packed[i] = static_cast<double>(raw[i]);
@@ -401,6 +422,83 @@ std::vector<double> FHEContextManager::decrypt_vector(
     for (int i = 0; i < limit && i < static_cast<int>(packed.size()); ++i)
         result[i] = packed[i];
     return result;
+}
+
+void FHEContextManager::print_ciphertext_coefficients(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct, usint num_coeffs_to_print)
+{
+    if (!ct) {
+        std::cout << "Ciphertext is null!" << std::endl;
+        return;
+    }
+
+    // Get the vector of DCRTPoly elements (typically c0 and c1)
+    const auto& elements = ct->GetElements();
+    std::cout << "=== Ciphertext Details ===" << std::endl;
+    std::cout << "Number of DCRTPoly elements: " << elements.size() << " (c0, c1)" << std::endl;
+    std::cout << "Current Level: " << ct->GetLevel() << std::endl;
+
+    for (size_t k = 0; k < elements.size(); ++k) {
+        // Clone element so we don't modify the original ciphertext state
+        lbcrypto::DCRTPoly poly = elements[k];
+
+        // Convert from EVALUATION (NTT) domain to COEFFICIENT domain
+        if (poly.GetFormat() == EVALUATION) {
+            poly.SetFormat(COEFFICIENT);
+        }
+
+        std::cout << "\n--- Element c[" << k << "] Coefficients ---" << std::endl;
+        size_t printCount = std::min(num_coeffs_to_print, poly.GetElementAtIndex(0).GetLength());
+
+        for (size_t i = 0; i < printCount; ++i) {
+            std::cout << "  Coeff[" << i << "] = " << poly.GetElementAtIndex(0)[i] << std::endl;
+        }
+    }
+}
+
+void FHEContextManager::decrypt_and_print_vector(const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct,
+                                            std::string name, usint num_coeffs_to_print, bool print_sorted) const
+{
+    if (!ct) {
+        std::cout << "[Decrypted Vector] Ciphertext is null!" << std::endl;
+        return;
+    }
+
+    // 1. Decrypt into a Plaintext object
+    Plaintext pt;
+    m_cc->Decrypt(m_keypair.secretKey, ct, &pt);
+
+    // 2. Truncate plaintext decoding length to prevent printing unused slots
+    usint totalSlots = m_cc->GetRingDimension() >> 1;
+    usint printCount = std::min(num_coeffs_to_print, totalSlots);
+    pt->SetLength(printCount);
+
+    // 3. Extract the underlying real-valued float/double vector
+    std::vector<double> values = pt->GetRealPackedValue();
+
+    // 4. Print results
+    std::cout << "\n=== Decrypted Vector (Name: " << name << ")===" << std::endl;
+    std::cout << "Level: " << ct->GetLevel() 
+              << " | NoiseScaleDeg: " << ct->GetNoiseScaleDeg() << std::endl;
+
+    std::cout << std::fixed << std::setprecision(5);
+    for (usint i = 0; i < printCount; ++i) {
+        std::cout << "  Slot[" << i << "] = " << values[i] << std::endl;
+    }
+
+    if(print_sorted == true){
+        std::cout << "\n=== Sorted ===" << std::endl;
+        std::vector<uint32_t> indices(values.size());
+        std::iota(indices.begin(), indices.end(), 0);
+
+        std::sort(indices.begin(), indices.end(), [&values](uint32_t i, uint32_t j) {
+            return values[i] < values[j];
+        });
+
+        uint32_t sorted_idx = 1;
+        for (size_t idx : indices) {
+            std::cout << sorted_idx++ << ":" << "  Slot[" << idx << "] = " << values[idx] << std::endl;
+        }
+    }
 }
 
 } // namespace anns_fhe

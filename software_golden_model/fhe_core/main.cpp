@@ -123,8 +123,9 @@ static void print_latency(double coarse_ms, double fine_ms, int query_idx)
 // ---------------------------------------------------------------------------
 static int mode_preprocess(const FHEConfig& config)
 {
-    std::cout << "\n=== FHE-Core Preprocessing ===" << std::endl;
-    std::cout << "Depth=" << config.multiplicative_depth
+    std::cout << "\n=== FHE-Core Preprocessing (" << config.pipeline_mode << ") ===" << std::endl;
+    std::cout << "Pipeline Mode=" << config.pipeline_mode
+              << "  Depth=" << config.multiplicative_depth
               << "  Slots=" << (config.poly_modulus_degree >> 1)
               << "  n_list=" << config.n_list
               << "  M=" << config.m_subvectors
@@ -179,7 +180,7 @@ static int mode_search_fhe(
     int jobs,
     int limit)
 {
-    std::cout << "\n=== FHE-Core Encrypted Search ===" << std::endl;
+    std::cout << "\n=== FHE-Core Encrypted Search (" << config.pipeline_mode << ") ===" << std::endl;
 
     // --- Load CryptoContext + keys + encrypted index ---
     FHEContextManager ctx_mgr;
@@ -248,6 +249,7 @@ static int mode_search_fhe(
     struct FHEQueryResult {
         std::vector<std::pair<int, float>> results;
         std::vector<double> timings;
+        FHESearchStats stats;
         double elapsed_ms = 0.0;
         double recall = 0.0;
         bool has_recall = false;
@@ -275,7 +277,8 @@ static int mode_search_fhe(
                 auto t0 = Clock::now();
 
                 std::vector<double> timings;
-                auto results = searcher.search(ctx_mgr, queries[qi], top_k, config, &timings);
+                FHESearchStats stats;
+                auto results = searcher.search(ctx_mgr, queries[qi], top_k, config, &timings, &stats);
 
                 auto t1 = Clock::now();
                 double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -283,6 +286,7 @@ static int mode_search_fhe(
                 int idx = qi - q_start;
                 batch_results[idx].results = std::move(results);
                 batch_results[idx].timings = std::move(timings);
+                batch_results[idx].stats   = stats;
                 batch_results[idx].elapsed_ms = elapsed_ms;
                 total_latencies[idx] = elapsed_ms;
 
@@ -315,6 +319,12 @@ static int mode_search_fhe(
             print_latency(qr.timings[0], qr.timings[1], qi);
         else
             std::cout << "LATENCY " << qi << ": total=" << qr.elapsed_ms << "ms" << std::endl;
+
+        std::cout << "LEVELS " << qi << ":"
+                  << " Step1=" << qr.stats.level_coarse_dist
+                  << " Step2=" << qr.stats.level_coarse_rank
+                  << " Step3=" << qr.stats.level_lut_dist
+                  << " Step4=" << qr.stats.level_fine_rank << std::endl;
 
         if (qr.has_recall)
         {
