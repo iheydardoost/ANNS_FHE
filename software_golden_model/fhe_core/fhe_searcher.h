@@ -102,30 +102,31 @@ namespace anns_fhe
             const FHEConfig& config) const;
 
         // -----------------------------------------------------------------------
-        // Step 3: ADC LUT construction & block distance computation (Depth 2)
+        // Step 3: SIMD-batched ADC distance computation (Depth 2 from fresh query)
+        // Uses dimension-major packing: slot[d*B+j] for dim d, candidate j
         // -----------------------------------------------------------------------
-        std::vector<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>> build_adc_lut(
+        lbcrypto::Ciphertext<lbcrypto::DCRTPoly> compute_batch_distances_dimpack(
             const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
-            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_query,
-            const std::vector<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>& ct_codebooks,
-            int centroid_id,
+            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_query_dimpack,
+            const std::vector<int>& batch_vec_ids,
             const FHEConfig& config) const;
 
-        lbcrypto::Ciphertext<lbcrypto::DCRTPoly> compute_candidate_distance(
-            const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
-            const std::vector<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>& lut,
-            int vector_idx,
+        // Build dimension-major plaintext batch from PQ reconstructions
+        void build_dimpack_plaintext(
+            const std::vector<int>& batch_vec_ids,
+            int B,
             const FHEConfig& config,
-            std::vector<double>& mask_buffer) const;
+            std::vector<double>& out_packed) const;
 
         // -----------------------------------------------------------------------
-        // Step 4: Block-wise Top-k candidate selection (N=64 Blocks, Depth 5)
+        // Step 3 cont: Probe penalty masking
+        // Applies (ct_dist - P) * ct_m_c + P so non-probed distances ≈ P
         // -----------------------------------------------------------------------
-        lbcrypto::Ciphertext<lbcrypto::DCRTPoly> filter_block_top_k(
+        lbcrypto::Ciphertext<lbcrypto::DCRTPoly> apply_probe_penalty(
             const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
-            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_block_dists,
-            int top_k,
-            double dist_bound,
+            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_dist,
+            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_m_c_replicated,
+            double penalty,
             const FHEConfig& config) const;
 
         // -----------------------------------------------------------------------
@@ -133,10 +134,14 @@ namespace anns_fhe
         // -----------------------------------------------------------------------
         std::vector<int32_t>  m_assignments;      // ivf_assignments.bin: vector → centroid
         std::vector<uint16_t> m_pq_codes;         // pq_codes.bin: vector × M codes
-        std::vector<float>    m_centroids_plain;  // ivf_centroids.bin: raw centroids
 
-        std::vector<std::vector<int>> m_inverted_lists;
+        std::vector<std::vector<int>> m_cluster_vector_ids;       // Cluster c → list of original vector IDs
+        std::vector<std::vector<uint16_t>> m_cluster_pq_codes;    // Cluster c → flattened PQ codes
         int m_num_vectors = 0;
+
+        // Plaintext centroids and codebooks (references set during search)
+        mutable const std::vector<float>* m_p_centroids = nullptr;
+        mutable const std::vector<float>* m_p_codebooks = nullptr;
     };
 
 } // namespace anns_fhe

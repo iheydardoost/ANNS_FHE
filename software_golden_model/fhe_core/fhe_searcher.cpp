@@ -54,7 +54,6 @@ namespace anns_fhe
     {
         const std::string assign_path  = config.resolve_path(config.encoding_output_dir + "/ivf_assignments.bin");
         const std::string codes_path   = config.resolve_path(config.encoding_output_dir + "/pq_codes.bin");
-        const std::string cent_path    = config.resolve_path(config.models_output_dir   + "/ivf_centroids.bin");
 
         auto load_bin = [](const std::string& path, auto& vec) -> bool {
             std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -69,8 +68,7 @@ namespace anns_fhe
             return true;
         };
 
-        if (!load_bin(assign_path, m_assignments) ||
-            !load_bin(cent_path,   m_centroids_plain))
+        if (!load_bin(assign_path, m_assignments))
         {
             return false;
         }
@@ -98,15 +96,27 @@ namespace anns_fhe
         }
 
         m_num_vectors = static_cast<int>(m_assignments.size());
+        const int M   = config.m_subvectors;
 
-        // Build inverted lists
-        m_inverted_lists.clear();
-        m_inverted_lists.resize(config.n_list);
+        // Build inverted lists and cluster-grouped mappings
+        m_cluster_vector_ids.clear();
+        m_cluster_vector_ids.resize(config.n_list);
+
+        m_cluster_pq_codes.clear();
+        m_cluster_pq_codes.resize(config.n_list);
+
         for (int i = 0; i < m_num_vectors; ++i)
         {
             int c = m_assignments[i];
             if (c >= 0 && c < config.n_list)
-                m_inverted_lists[c].push_back(i);
+            {
+                m_cluster_vector_ids[c].push_back(i);
+
+                for (int m = 0; m < M; ++m)
+                {
+                    m_cluster_pq_codes[c].push_back(m_pq_codes[static_cast<size_t>(i) * M + m]);
+                }
+            }
         }
 
         return true;
@@ -178,27 +188,15 @@ namespace anns_fhe
             }
             auto pt_mask = cc->MakeCKKSPackedPlaintext(mask, 1, current_level);
 
-            #ifdef ENABLE_LOGGING
-            std::cout << "===== in compact_distances(), 1: " << i << "/" << n_list << std::endl;
-            #endif
-
             // 2. Extract slot i*dim
             auto ct_sel = cc->EvalMult(ct_strided, pt_mask);
             ct_sel = cc->Rescale(ct_sel);
-
-            #ifdef ENABLE_LOGGING
-            std::cout << "===== in compact_distances(), 2: " << i << "/" << n_list << std::endl;
-            #endif
 
             // 3. Move slot (i * dim) to slot i (Left shift by i * (dim - 1))
             int shift = i * (dim - 1);
             if (shift != 0) {
                 ct_sel = rotate(cc, ct_sel, shift);
             }
-
-            #ifdef ENABLE_LOGGING
-            std::cout << "===== in compact_distances(), 3: " << i << "/" << n_list << std::endl;
-            #endif
 
             // 4. Accumulate
             if (first) {
@@ -209,7 +207,7 @@ namespace anns_fhe
             }
 
             #ifdef ENABLE_LOGGING
-            std::cout << "===== in compact_distances(), 4: " << i << "/" << n_list << std::endl;
+            std::cout << "===== in compact_distances(): " << i << "/" << n_list << std::endl;
             #endif
         }
 
@@ -289,164 +287,115 @@ namespace anns_fhe
     }
 
     // ---------------------------------------------------------------------------
-    // Step 3a: Construct m_subvectors x k_subcentroids Look-Up Table (LUT) in 1 Ciphertext
-    // Depth: 1 mult level (subvector residual squaring) + 1 mult level (compacting mask) = 2 levels
+    // Step 3a: Build dimension-major plaintext batch from PQ reconstructions
+    // Layout: slot[d*B + j] = x_j_approx[d] where x_j_approx = centroid + codebook lookup
     // ---------------------------------------------------------------------------
-    std::vector<Ciphertext<DCRTPoly>> FHESearcher::build_adc_lut(
-        const CryptoContext<DCRTPoly>& cc,
-        const Ciphertext<DCRTPoly>& ct_query,
-        const std::vector<Ciphertext<DCRTPoly>>& ct_codebooks,
-        int centroid_id,
-        const FHEConfig& config) const
+    void FHESearcher::build_dimpack_plaintext(
+        const std::vector<int>& batch_vec_ids,
+        int B,
+        const FHEConfig& config,
+        std::vector<double>& out_packed) const
     {
+        const int D       = config.dimension;
         const int M       = config.m_subvectors;
         const int K       = config.k_subcentroids;
-        const int dim     = config.dimension;
-        const int sub_dim = dim / M;
+        const int sub_dim = D / M;
         const int slots   = config.poly_modulus_degree >> 1;
 
-        std::vector<Ciphertext<DCRTPoly>> lut(M);
-        const float* c_ptr = m_centroids_plain.data() + centroid_id * dim;
+        out_packed.assign(slots, 0.0);
 
-        for (int m = 0; m < M; ++m)
+        for (int j = 0; j < static_cast<int>(batch_vec_ids.size()); ++j)
         {
-            // Replicate centroid subvector K times
-            std::vector<double> centroid_rep(slots, 0.0);
-            for (int k = 0; k < K; ++k)
-                for (int d = 0; d < sub_dim; ++d)
-                {
-                    int slot = k * sub_dim + d;
-                    if (slot < slots)
-                        centroid_rep[slot] = static_cast<double>(c_ptr[m * sub_dim + d]);
-                }
-            auto pt_centroid = cc->MakeCKKSPackedPlaintext(centroid_rep);
+            int vid = batch_vec_ids[j];
+            int c   = m_assignments[vid];  // cluster assignment
 
-            // Extract subvector m from query
-            std::vector<double> q_sub_mask(slots, 0.0);
-            for (int d = 0; d < sub_dim; ++d)
-                if (m * sub_dim + d < slots)
-                    q_sub_mask[m * sub_dim + d] = 1.0;
-            auto pt_q_mask = cc->MakeCKKSPackedPlaintext(q_sub_mask);
-
-            auto ct_q_sub_raw = cc->EvalMult(ct_query, pt_q_mask);
-            ct_q_sub_raw = cc->Rescale(ct_q_sub_raw);
-
-            if (m * sub_dim > 0)
-                ct_q_sub_raw = rotate(cc, ct_q_sub_raw, m * sub_dim);
-
-            auto ct_q_rep = ct_q_sub_raw;
-            for (int stride = sub_dim; stride < K * sub_dim; stride *= 2)
+            for (int d = 0; d < D; ++d)
             {
-                auto shifted = cc->EvalRotate(ct_q_rep, -stride);
-                ct_q_rep = cc->EvalAdd(ct_q_rep, shifted);
-            }
+                // Start with centroid component
+                double val = static_cast<double>((*m_p_centroids)[c * D + d]);
 
-            // Residual against codebook: (q - c - cb)^2
-            auto ct_res  = cc->EvalSub(ct_q_rep, pt_centroid);
-            auto ct_diff = cc->EvalSub(ct_res, ct_codebooks[m]);
-            auto ct_dist = cc->EvalMult(ct_diff, ct_diff);
-            ct_dist = cc->Rescale(ct_dist);
+                // Add PQ codebook component
+                int m = d / sub_dim;
+                int sub_d = d % sub_dim;
+                uint16_t code = m_pq_codes[static_cast<size_t>(vid) * M + m];
+                int cb_offset = m * K * sub_dim + code * sub_dim + sub_d;
+                val += static_cast<double>((*m_p_codebooks)[cb_offset]);
 
-            // Sum within sub_dim blocks
-            for (int stride = 1; stride < sub_dim; stride *= 2)
-            {
-                auto shifted = cc->EvalRotate(ct_dist, stride);
-                ct_dist = cc->EvalAdd(ct_dist, shifted);
+                out_packed[d * B + j] = val;
             }
-            lut[m] = ct_dist;
         }
-        return lut;
     }
 
     // ---------------------------------------------------------------------------
-    // Step 3b: Candidate distance computation for 1 candidate vector
+    // Step 3b: Compute batch distances using dimension-major SIMD packing
+    // ct_query_dimpack has layout: slot[d*B+j] = q[d] for all j
+    // pt_batch has layout: slot[d*B+j] = x_j_approx[d]
+    // Result: slot[j] = ||q - x_j_approx||^2 for j = 0..B-1
+    // Depth consumed: 2 level
     // ---------------------------------------------------------------------------
-    Ciphertext<DCRTPoly> FHESearcher::compute_candidate_distance(
+    Ciphertext<DCRTPoly> FHESearcher::compute_batch_distances_dimpack(
         const CryptoContext<DCRTPoly>& cc,
-        const std::vector<Ciphertext<DCRTPoly>>& lut,
-        int vector_idx,
-        const FHEConfig& config,
-        std::vector<double>& mask_buffer) const
-    {
-        const int M       = config.m_subvectors;
-        const int dim     = config.dimension;
-        const int sub_dim = dim / M;
-        const int slots   = config.poly_modulus_degree >> 1;
-
-        Ciphertext<DCRTPoly> ct_sum;
-        bool first = true;
-
-        for (int m = 0; m < M; ++m)
-        {
-            uint16_t code = m_pq_codes[static_cast<size_t>(vector_idx) * M + m];
-            int hot_slot  = static_cast<int>(code) * sub_dim;
-
-            auto shifted = (hot_slot != 0) ? rotate(cc, lut[m], hot_slot) : lut[m];
-            if (first) {
-                ct_sum = shifted;
-                first  = false;
-            } else {
-                ct_sum = cc->EvalAdd(ct_sum, shifted);
-            }
-        }
-
-        std::fill(mask_buffer.begin(), mask_buffer.end(), 0.0);
-        if (slots > 0)
-            mask_buffer[0] = 1.0;
-        auto pt_mask = cc->MakeCKKSPackedPlaintext(mask_buffer);
-        auto ct_dist = cc->EvalMult(ct_sum, pt_mask);
-        cc->Rescale(ct_dist);
-
-        return ct_dist;
-    }
-
-    // ---------------------------------------------------------------------------
-    // Step 4: Block-wise Top-k Candidate Selection (N=64 Blocks)
-    // Depth: 3 levels (Chebyshev Sign deg 15) + 2 levels (Indicator deg 7) = 5 levels
-    // Total Depth after Step 4 = 13 + 5 = 18 levels
-    // ---------------------------------------------------------------------------
-    Ciphertext<DCRTPoly> FHESearcher::filter_block_top_k(
-        const CryptoContext<DCRTPoly>& cc,
-        const Ciphertext<DCRTPoly>& ct_block_dists,
-        int top_k,
-        double dist_bound,
+        const Ciphertext<DCRTPoly>& ct_query_dimpack,
+        const std::vector<int>& batch_vec_ids,
         const FHEConfig& config) const
     {
-        const size_t N = 64;
+        const int D     = config.dimension;
+        const int slots = config.poly_modulus_degree >> 1;
+        const int B     = slots / D;  // 256
 
-        // Mazzone N=64 matrix re-encoding (0 mult depth)
-        auto c_row       = anns_fhe::replicate_row(ct_block_dists, N);
-        normalize_scale(cc, c_row);
-        auto c_col_trans = anns_fhe::transpose_row(ct_block_dists, N, true);
-        normalize_scale(cc, c_col_trans);
-        auto c_col       = anns_fhe::replicate_column(c_col_trans, N);
+        // Build plaintext batch in dimension-major layout
+        std::vector<double> packed;
+        build_dimpack_plaintext(batch_vec_ids, B, config, packed);
+        auto pt_batch = cc->MakeCKKSPackedPlaintext(packed, 1, ct_query_dimpack->GetLevel());
 
-        // Difference matrix Δ_uv = Dist_u - Dist_v
-        auto ct_diff = cc->EvalSub(c_col, c_row);
+        // Componentwise difference: q[d] - x_j[d] for all (d, j)  (0 mult depth)
+        auto ct_diff = cc->EvalSub(ct_query_dimpack, pt_batch);
 
-        // 1. Evaluate ApproxSign(Δ_uv) (Degree 15, Depth 3)
-        auto S_uv = SignApproximator::eval_sign(cc, ct_diff, -dist_bound, dist_bound, openfhe_stats::depth2degree(3), 1e-20);
+        // Componentwise square  (1 mult depth)
+        auto ct_sq = cc->EvalMult(ct_diff, ct_diff);
+        ct_sq = cc->Rescale(ct_sq);
 
-        // 2. Compute local ranks via column sum (0 mult depth)
-        auto ct_sum_cols = anns_fhe::sum_columns(S_uv, N, true);
-        normalize_scale(cc, ct_sum_cols);
-        auto ct_ranks    = anns_fhe::transpose_column(ct_sum_cols, N, true);
-        normalize_scale(cc, ct_ranks);
+        // Tree reduction across D dimension blocks (1 mult depth)
+        ct_sq = anns_fhe::sum_rows(ct_sq, B, true);
+        ct_sq = cc->Rescale(ct_sq);
 
-        // 3. Evaluate Top-k indicator polynomial P_k(Rank) (Degree 7, Depth 2)
-        double threshold_min = 0.5;
-        double threshold_max = static_cast<double>(top_k) + 0.5;
-        auto ct_indicator = SignApproximator::eval_indicator(
-            cc, ct_ranks, threshold_min, threshold_max, 0.0, static_cast<double>(N), openfhe_stats::depth2degree(2));
-
-        // 4. Apply penalty mask to non-top-k candidates
-        auto ct_inv_ind = cc->EvalSub(1.0, ct_indicator);
-        auto ct_pen     = cc->EvalMult(ct_inv_ind, dist_bound);
-        cc->Rescale(ct_pen);
-        auto ct_filtered = cc->EvalAdd(ct_block_dists, ct_pen);
-
-        return ct_filtered;
+        return ct_sq;
     }
+
+    // ---------------------------------------------------------------------------
+    // Step 3c: Apply probe penalty mask
+    // Formula: ct_final = (ct_dist - P) * ct_m_c + P
+    // When m_c ≈ 1 (probed):     ct_final ≈ ct_dist
+    // When m_c ≈ 0 (not probed): ct_final ≈ P  (large → excluded from top-k)
+    // ---------------------------------------------------------------------------
+    Ciphertext<DCRTPoly> FHESearcher::apply_probe_penalty(
+        const CryptoContext<DCRTPoly>& cc,
+        const Ciphertext<DCRTPoly>& ct_dist,
+        const Ciphertext<DCRTPoly>& ct_m_c_replicated,
+        double penalty,
+        const FHEConfig& config) const
+    {
+        // Bring ct_dist to the same level as ct_m_c_replicated using LevelReduce
+        auto ct_adjusted = ct_dist;
+        int drop_level = ct_m_c_replicated->GetLevel() - ct_adjusted->GetLevel();
+        if (drop_level > 0)
+        {
+            ct_adjusted = cc->LevelReduce(ct_adjusted, nullptr, drop_level);
+        }
+
+        // ct_shifted = ct_dist - P  (plaintext subtraction, 0 mult depth)
+        auto ct_shifted = cc->EvalSub(ct_adjusted, penalty);
+
+        // ct_masked = ct_shifted * ct_m_c  (1 mult depth)
+        auto ct_masked = cc->EvalMult(ct_shifted, ct_m_c_replicated);
+        ct_masked = cc->Rescale(ct_masked);
+
+        // ct_final = ct_masked + P  (plaintext addition, 0 mult depth)
+        auto ct_final = cc->EvalAdd(ct_masked, penalty);
+
+        return ct_final;
+    }
+
 
     // ---------------------------------------------------------------------------
     // Full Search Orchestration
@@ -528,130 +477,133 @@ namespace anns_fhe
         #endif
 
         // -----------------------------------------------------------------------
-        // Step 3: ADC LUT construction & candidate block distances (Depth 2)
+        // Step 3: SIMD-batched ADC distance computation (Dimension-major packing)
         // -----------------------------------------------------------------------
-        std::vector<std::vector<Ciphertext<DCRTPoly>>> all_luts(config.n_list);
+        m_p_centroids = &ctx_mgr.get_plaintext_centroids();
+        m_p_codebooks = &ctx_mgr.get_plaintext_codebooks();
+
+        // Encrypt query in dimension-major layout for Step 3
+        auto ct_query_dimpack = ctx_mgr.encrypt_query_dimpack(query, config);
+
+        const int B = slots / config.dimension;  // 256
+        const double penalty = 1.0e6;
+
+        // Pre-extract per-cluster mask scalars from ct_mask_coarse
+        // ct_mask_coarse has m_c at slot c for c = 0..n_list-1
+        std::vector<Ciphertext<DCRTPoly>> ct_m_c_vec(config.n_list);
         for (int c = 0; c < config.n_list; ++c)
         {
-            all_luts[c] = build_adc_lut(cc, ct_query, ctx_mgr.get_encrypted_codebooks(), c, config);
+            // Extract scalar m_c from slot c
+            std::vector<double> mask_c(slots, 0.0);
+            mask_c[c] = 1.0;
+            auto pt_mask_c = cc->MakeCKKSPackedPlaintext(mask_c, 1, ct_mask_coarse->GetLevel());
+            auto ct_m_c_slot = cc->EvalMult(ct_mask_coarse, pt_mask_c);
+            ct_m_c_slot = cc->Rescale(ct_m_c_slot);
+
+            // Shift slot c to slot 0
+            if (c != 0)
+                ct_m_c_slot = rotate(cc, ct_m_c_slot, c);
+
+            // Replicate scalar to B slots [0..B-1]
+            for (int stride = 1; stride < B; stride *= 2)
+            {
+                auto shifted = cc->EvalRotate(ct_m_c_slot, -stride);
+                ct_m_c_slot = cc->EvalAdd(ct_m_c_slot, shifted);
+            }
+
+            ct_m_c_vec[c] = ct_m_c_slot;
         }
 
-        std::vector<Ciphertext<DCRTPoly>> cand_dists;
-        std::vector<int> cand_ids;
-        std::vector<double> mask_buffer(slots, 0.0);
+        #ifdef ENABLE_LOGGING
+        std::cout << "Step 3: Pre-extracted " << config.n_list << " probe mask scalars." << std::endl;
+        #endif
 
-        for (int i = 0; i < m_num_vectors; ++i)
+        // Process each cluster: compute distances, apply probe penalty
+        std::vector<std::pair<int, float>> all_candidates;
+        int final_mult_level = 0;
+        int final_noise_degree = 0;
+
+        for (int c = 0; c < config.n_list; ++c)
         {
-            int cid = m_assignments[i];
-            if (cid >= 0 && cid < config.n_list)
+            const auto& c_vids = m_cluster_vector_ids[c];
+            if (c_vids.empty()) continue;
+
+            // Process in batches of B
+            for (int batch_start = 0; batch_start < static_cast<int>(c_vids.size()); batch_start += B)
             {
-                auto ct_d = compute_candidate_distance(cc, all_luts[cid], i, config, mask_buffer);
-                cand_dists.push_back(ct_d);
-                cand_ids.push_back(i);
+                int batch_end = std::min(batch_start + B, static_cast<int>(c_vids.size()));
+                std::vector<int> batch_ids(c_vids.begin() + batch_start, c_vids.begin() + batch_end);
+                int batch_count = static_cast<int>(batch_ids.size());
+
+                // Compute SIMD-batched distances (depth +2 from fresh query)
+                auto ct_dists = compute_batch_distances_dimpack(cc, ct_query_dimpack, batch_ids, config);
+
+                // Apply probe penalty mask (level-matches and multiplies by m_c) (depth +1)
+                auto ct_penalized = apply_probe_penalty(cc, ct_dists, ct_m_c_vec[c], penalty, config);
+
+                // Decrypt distances (client-side simulation)
+                auto dec_dists = ctx_mgr.decrypt_vector(ct_penalized, batch_count);
+                final_mult_level = ct_penalized->GetLevel();
+                final_noise_degree = ct_penalized->GetNoiseScaleDeg();
+
+                for (int j = 0; j < batch_count; ++j)
+                {
+                    all_candidates.emplace_back(batch_ids[j], static_cast<float>(dec_dists[j]));
+                }
+
+                #ifdef ENABLE_LOGGING
+                std::cout << "  Cluster " << c << " batch [" << batch_start << ".." << batch_end
+                          << ") processed (" << batch_count << " candidates)" << std::endl;
+                #endif
             }
         }
 
-        if (stats && !cand_dists.empty()) stats->level_lut_dist = cand_dists[0]->GetLevel();
+        if (stats && !all_candidates.empty()) stats->level_lut_dist = ct_m_c_vec[0]->GetLevel();
         auto t3 = std::chrono::high_resolution_clock::now();
 
         #ifdef ENABLE_LOGGING
-        std::cout << "Step 3: ADC LUT construction & candidate block distances done!" << std::endl;
-        std::cout << "stats->level_lut_dist = " << stats->level_lut_dist << std::endl;
+        std::cout << "Step 3: SIMD-batched ADC distances + probe masking done!" << std::endl;
+        std::cout << "Final Level: " << final_mult_level << std::endl;
+        std::cout << "Noise Scale Deg: " << final_noise_degree << std::endl;
+        std::cout << "Total candidates: " << all_candidates.size() << std::endl;
         std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t3-t2) << " ms" << std::endl;
         std::cout << "--------------------------------------------------------------" << std::endl;
         #endif
 
         // -----------------------------------------------------------------------
-        // Step 4: Block-wise Top-k candidate selection (N=64 Blocks, Depth 5)
+        // Step 4: Client-side sorting and top-k selection (no homomorphic ranking)
         // -----------------------------------------------------------------------
-        const int batch_size = 64;
-        const int N_cand = static_cast<int>(cand_dists.size());
-        const int num_batches = (N_cand + batch_size - 1) / batch_size;
+        std::sort(all_candidates.begin(), all_candidates.end(),
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
 
-        std::vector<Ciphertext<DCRTPoly>> filtered_blocks;
-        std::vector<std::vector<int>> block_candidate_ids;
-
-        for (int b = 0; b < num_batches; ++b)
+        std::vector<std::pair<int, float>> results;
+        for (int i = 0; i < static_cast<int>(all_candidates.size()) && i < top_k; ++i)
         {
-            int start_idx = b * batch_size;
-            int count = std::min(batch_size, N_cand - start_idx);
-
-            Ciphertext<DCRTPoly> ct_batch;
-            std::vector<int> b_ids(batch_size, -1);
-            bool first = true;
-
-            for (int j = 0; j < count; ++j)
+            if (all_candidates[i].second < penalty * 0.5f)
             {
-                int c_idx = start_idx + j;
-                b_ids[j] = cand_ids[c_idx];
-
-                auto shifted = (j != 0) ? rotate(cc, cand_dists[c_idx], -j) : cand_dists[c_idx];
-                if (first) {
-                    ct_batch = shifted;
-                    first = false;
-                } else {
-                    ct_batch = cc->EvalAdd(ct_batch, shifted);
-                }
+                results.push_back(all_candidates[i]);
             }
-            if (count < batch_size)
-            {
-                std::vector<double> pad_mask(slots, 0.0);
-                for (int j = count; j < batch_size; ++j)
-                    pad_mask[j] = dist_bound;
-                auto pt_pad = cc->MakeCKKSPackedPlaintext(pad_mask);
-                ct_batch = cc->EvalAdd(ct_batch, pt_pad);
-            }
-
-            auto ct_filtered = filter_block_top_k(cc, ct_batch, top_k, dist_bound, config);
-            filtered_blocks.push_back(ct_filtered);
-            block_candidate_ids.push_back(b_ids);
         }
 
-        if (stats && !filtered_blocks.empty()) stats->level_fine_rank = filtered_blocks[0]->GetLevel();
-
+        if (stats && !results.empty()) stats->level_fine_rank = 0;  // Client-side, no FHE depth
         auto t4 = std::chrono::high_resolution_clock::now();
 
         #ifdef ENABLE_LOGGING
-        std::cout << "Step 4: Block-wise Top-k candidate selection done!" << std::endl;
-        std::cout << "stats->level_fine_rank = " << stats->level_fine_rank << std::endl;
-        std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t4-t3) << std::endl;
+        std::cout << "Step 4: Client-side top-k selection done!" << std::endl;
+        std::cout << "Selected " << results.size() << " results out of " << all_candidates.size() << " candidates" << std::endl;
+        std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t4-t3) << " ms" << std::endl;
         std::cout << "--------------------------------------------------------------" << std::endl;
         #endif
-
-        // -----------------------------------------------------------------------
-        // Decrypt final top-k candidates for client result retrieval
-        // -----------------------------------------------------------------------
-        std::vector<std::pair<int, float>> results;
-        if (!filtered_blocks.empty())
-        {
-            auto dec_dists = ctx_mgr.decrypt_vector(filtered_blocks[0], static_cast<int>(block_candidate_ids[0].size()));
-            for (size_t j = 0; j < block_candidate_ids[0].size(); ++j)
-            {
-                if (block_candidate_ids[0][j] >= 0 && dec_dists[j] < dist_bound * 0.5)
-                {
-                    results.emplace_back(block_candidate_ids[0][j], static_cast<float>(dec_dists[j]));
-                }
-            }
-        }
-
-        std::sort(results.begin(), results.end(),
-                  [](const auto& a, const auto& b) { return a.second < b.second; });
-        if (static_cast<int>(results.size()) > top_k)
-            results.resize(top_k);
 
         if (timings)
         {
             timings->resize(2);
             (*timings)[0] = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            (*timings)[1] = std::chrono::duration<double, std::milli>(t3 - t1).count();
+            (*timings)[1] = std::chrono::duration<double, std::milli>(t4 - t1).count();
         }
 
-        #ifdef ENABLE_LOGGING
-        std::cout << "Decrypt final top-k candidates for client result retrieval done!" << std::endl;
-        std::cout << "--------------------------------------------------------------" << std::endl;
-        #endif
-
         return results;
+
     }
 
 } // namespace anns_fhe

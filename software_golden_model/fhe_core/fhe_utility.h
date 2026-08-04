@@ -3,6 +3,7 @@
 
 #include "openfhe.h"
 #include "fhe_config.h"
+#include "utils-ptxt.h"
 
 namespace anns_fhe
 {

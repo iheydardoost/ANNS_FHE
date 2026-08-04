@@ -40,14 +40,22 @@ namespace anns_fhe
         // Load CryptoContext + all keys + encrypted index data from disk.
         bool load_from_disk(const FHEConfig& config);
 
+        // Load plaintext centroids and codebooks for Step 3 SIMD-batched distances.
+        bool load_plaintext_index(const FHEConfig& config);
+
         // -----------------------------------------------------------------------
         // Client-Side Simulation Helpers
         // -----------------------------------------------------------------------
 
         // Encrypt a full D-dimensional query vector into a single SIMD-packed
         // ciphertext whose layout matches the encrypted centroids.
-        // Layout: [q_d0..q_d{D-1}, q_d0..q_d{D-1}, ...] replicated n_list times.
         lbcrypto::Ciphertext<lbcrypto::DCRTPoly> encrypt_query_packed(
+            const std::vector<float>& query,
+            const FHEConfig& config) const;
+
+        // Encrypt query in dimension-major layout for SIMD-batched Step 3.
+        // Layout: slots [d*B..d*B+B-1] = q[d] for all d, where B = slots/D.
+        lbcrypto::Ciphertext<lbcrypto::DCRTPoly> encrypt_query_dimpack(
             const std::vector<float>& query,
             const FHEConfig& config) const;
 
@@ -67,6 +75,12 @@ namespace anns_fhe
 
         const std::vector<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>& get_encrypted_codebooks() const
             { return m_encrypted_codebooks; }
+
+        const std::vector<float>& get_plaintext_centroids() const
+            { return m_plaintext_centroids; }
+
+        const std::vector<float>& get_plaintext_codebooks() const
+            { return m_plaintext_codebooks; }
 
         bool is_initialized() const { return m_is_initialized; }
 
@@ -88,6 +102,10 @@ namespace anns_fhe
         // Pre-loaded encrypted index data (online mode)
         lbcrypto::Ciphertext<lbcrypto::DCRTPoly>              m_encrypted_centroids;
         std::vector<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>> m_encrypted_codebooks;
+
+        // Plaintext index data for Step 3 (SIMD-batched distance computation)
+        std::vector<float> m_plaintext_centroids;   // n_list * D floats
+        std::vector<float> m_plaintext_codebooks;   // M * K * sub_dim floats
 
         bool m_is_initialized = false;
     };

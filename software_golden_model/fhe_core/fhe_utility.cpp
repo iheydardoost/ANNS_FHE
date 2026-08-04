@@ -3,7 +3,6 @@
 #include <iostream>
 #include <cmath>
 #include <cassert>
-#include "utils-ptxt.h"
 
 using namespace lbcrypto;
 

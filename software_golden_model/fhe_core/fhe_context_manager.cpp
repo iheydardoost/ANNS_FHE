@@ -30,7 +30,7 @@ std::vector<int32_t> FHEContextManager::compute_rotation_indices(const FHEConfig
 
     // 1. Step 1 accumulation reductions (dim 128: 1, 2, 4, 8, 16, 32, 64)
     std::vector<int> idx_acc;
-    for (int i = 0; i < 7; i++)
+    for (int i = 0; i < LOG2(config.dimension); i++)
     {
         idx_acc.push_back(1 << i); 
     }
@@ -40,17 +40,23 @@ std::vector<int32_t> FHEContextManager::compute_rotation_indices(const FHEConfig
     auto idx32 = anns_fhe::get_rotation_indices(32);
     idx.insert(idx32.begin(), idx32.end());
 
-    // 3. Mazzone indices for Candidate Blocks (N = 64)
-    auto idx64 = anns_fhe::get_rotation_indices(64);
-    idx.insert(idx64.begin(), idx64.end());
+    // 3. indices for sum_row() with batch_len
+    const int batch_len = (config.poly_modulus_degree >> 1) / config.dimension;
+    std::vector<int32_t> idx_batch;
+    for (size_t i = 0; i < LOG2(batch_len); i++)
+    {
+        int32_t index = batch_len * (1 << i);
+        idx_batch.push_back(index);   // sumRows
+    }
+    idx.insert(idx_batch.begin(), idx_batch.end());
 
     #ifdef ENABLE_LOGGING
     printf("--------------- Rotation indices:\n accumulation reductions: ");
     for(auto idx_ : idx_acc) printf("%d, ", idx_);
     printf("\nindices for Coarse Centroids (N = 32): ");
     for(auto idx_ : idx32) printf("%d, ", idx_);
-    printf("\nindices for Candidate Blocks (N = 64): ");
-    for(auto idx_ : idx64) printf("%d, ", idx_);
+    printf("\nindices for Batch Matrices: ");
+    for(auto idx_ : idx_batch) printf("%d, ", idx_);
     printf("\n---------------\n");
     #endif
 
@@ -383,7 +389,55 @@ bool FHEContextManager::load_from_disk(const FHEConfig& config)
     std::cout << "[FHEContextManager] Encrypted index loaded ("
               << m_encrypted_codebooks.size() << " codebook ciphertexts)." << std::endl;
 
+    // 8. Plaintext centroids and codebooks for Step 3
+    if (!load_plaintext_index(config))
+    {
+        std::cerr << "[FHEContextManager] Failed to load plaintext index data." << std::endl;
+        return false;
+    }
+
     m_is_initialized = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Online: Load plaintext index
+// ---------------------------------------------------------------------------
+bool FHEContextManager::load_plaintext_index(const FHEConfig& config)
+{
+    // Load plaintext centroids
+    {
+        const std::string path = config.resolve_path(
+            config.models_output_dir + "/ivf_centroids.bin");
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) {
+            std::cerr << "[FHEContextManager] Cannot open: " << path << std::endl;
+            return false;
+        }
+        size_t bytes = f.tellg();
+        f.seekg(0);
+        m_plaintext_centroids.resize(bytes / sizeof(float));
+        f.read(reinterpret_cast<char*>(m_plaintext_centroids.data()), bytes);
+    }
+
+    // Load plaintext codebooks
+    {
+        const std::string path = config.resolve_path(
+            config.models_output_dir + "/pq_codebooks.bin");
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) {
+            std::cerr << "[FHEContextManager] Cannot open: " << path << std::endl;
+            return false;
+        }
+        size_t bytes = f.tellg();
+        f.seekg(0);
+        m_plaintext_codebooks.resize(bytes / sizeof(float));
+        f.read(reinterpret_cast<char*>(m_plaintext_codebooks.data()), bytes);
+    }
+
+    std::cout << "[FHEContextManager] Plaintext index loaded ("
+              << m_plaintext_centroids.size() << " centroid floats, "
+              << m_plaintext_codebooks.size() << " codebook floats)." << std::endl;
     return true;
 }
 
@@ -403,6 +457,27 @@ Ciphertext<DCRTPoly> FHEContextManager::encrypt_query_packed(
     for (int rep = 0; rep < n && rep * dim < slots; ++rep)
         for (int d = 0; d < dim && rep * dim + d < slots; ++d)
             packed[rep * dim + d] = static_cast<double>(query[d]);
+
+    Plaintext pt = m_cc->MakeCKKSPackedPlaintext(packed);
+    return m_cc->Encrypt(m_keypair.publicKey, pt);
+}
+
+// ---------------------------------------------------------------------------
+// Client-side: Encrypt query in dimension-major layout for SIMD-batched Step 3.
+// Layout: slots [d*B..d*B+B-1] = q[d] for all d, where B = slots/D.
+// ---------------------------------------------------------------------------
+Ciphertext<DCRTPoly> FHEContextManager::encrypt_query_dimpack(
+    const std::vector<float>& query,
+    const FHEConfig& config) const
+{
+    const int slots = config.poly_modulus_degree >> 1;
+    const int dim   = config.dimension;
+    const int B     = slots / dim;  // 256
+
+    std::vector<double> packed(slots, 0.0);
+    for (int d = 0; d < dim && d < static_cast<int>(query.size()); ++d)
+        for (int j = 0; j < B; ++j)
+            packed[d * B + j] = static_cast<double>(query[d]);
 
     Plaintext pt = m_cc->MakeCKKSPackedPlaintext(packed);
     return m_cc->Encrypt(m_keypair.publicKey, pt);
