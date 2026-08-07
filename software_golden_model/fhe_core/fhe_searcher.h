@@ -84,12 +84,16 @@ namespace anns_fhe
         lbcrypto::Ciphertext<lbcrypto::DCRTPoly> compute_coarse_distances(
             const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
             const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_query,
-            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_centroids,
             const FHEConfig& config) const;
 
         lbcrypto::Ciphertext<lbcrypto::DCRTPoly> compact_distances(
             const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
             const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_strided,
+            const FHEConfig& config) const;
+
+        std::vector<int> select_clusters_interactive(
+            const FHEContextManager& ctx_mgr,
+            const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_compact_dists,
             const FHEConfig& config) const;
 
         // -----------------------------------------------------------------------

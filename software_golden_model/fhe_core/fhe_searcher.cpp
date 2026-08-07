@@ -31,11 +31,11 @@ namespace anns_fhe
         int abs_rot = std::abs(rot);
         int sign = (rot > 0) ? 1 : -1;
 
-        // To avoid needing keys > 64, perform rotations in max-64 steps:
-        while (abs_rot > 0) {
+        while (abs_rot > 0) 
+        {
             int step_size = 1;
-            // Find largest power of 2 <= 64 that fits in abs_rot
-            while ((step_size << 1) <= abs_rot && (step_size << 1) <= 64) {
+            while ((step_size << 1) <= abs_rot) 
+            {
                 step_size <<= 1;
             }
             
@@ -129,42 +129,57 @@ namespace anns_fhe
     Ciphertext<DCRTPoly> FHESearcher::compute_coarse_distances(
         const CryptoContext<DCRTPoly>& cc,
         const Ciphertext<DCRTPoly>& ct_query,
-        const Ciphertext<DCRTPoly>& ct_centroids,
         const FHEConfig& config) const
     {
+        const int n_list = config.n_list;
+        const int dim = config.dimension;
+        const int slots = config.poly_modulus_degree >> 1;
+        
+        std::vector<double> packed_centroids(slots, 0.0);
+        for (int c = 0; c < n_list; ++c) 
+        {
+            for (int d = 0; d < dim; ++d) 
+            {
+                if (c * dim + d < slots) 
+                {
+                    packed_centroids[c * dim + d] = static_cast<double>((*m_p_centroids)[c * dim + d]);
+                }
+            }
+        }
+        auto pt_centroids = cc->MakeCKKSPackedPlaintext(packed_centroids, 1, ct_query->GetLevel());
+
         // 1. Componentwise difference: q - c
-        auto ct_diff = cc->EvalSub(ct_query, ct_centroids);
+        auto ct_diff = cc->EvalSub(ct_query, pt_centroids);
 
         #ifdef ENABLE_LOGGING
         std::cout << "===== in compute_coarse_distances(), 1" << std::endl;
         #endif
 
         // 2. Componentwise square: (q - c)^2  (Level 1)
-        auto ct_sq = cc->EvalMult(ct_diff, ct_diff);
-        ct_sq = cc->Rescale(ct_sq);
+        ct_diff = cc->EvalMult(ct_diff, ct_diff);
+        ct_diff = cc->Rescale(ct_diff);
 
         #ifdef ENABLE_LOGGING
         std::cout << "===== in compute_coarse_distances(), 2" << std::endl;
         #endif
 
         // 3. Tree reduction over 128 dims (0 depth)
-        auto ct_acc = ct_sq;
         for (int stride = 1; stride < config.dimension; stride *= 2)
         {
-            auto shifted = cc->EvalRotate(ct_acc, stride);
-            ct_acc = cc->EvalAdd(ct_acc, shifted);
+            auto shifted = cc->EvalRotate(ct_diff, stride);
+            ct_diff = cc->EvalAdd(ct_diff, shifted);
 
             #ifdef ENABLE_LOGGING
             std::cout << "===== in compute_coarse_distances(), 3: " << stride << "/" << config.dimension << std::endl;
             #endif
         }
 
-        return ct_acc;
+        return ct_diff;
     }
 
     // ---------------------------------------------------------------------------
-    // Step 1b: Compact distances at stride 128 into slots [0..31]
-    // Depth: 1 mult level for plaintext mask isolation => Total Step 1 Depth = 2
+    // Step 1b: Compact distances at stride dim into slots [0..n_list]
+    // Depth: 1 mult level for plaintext mask isolation
     // ---------------------------------------------------------------------------
     Ciphertext<DCRTPoly> FHESearcher::compact_distances(
         const CryptoContext<DCRTPoly>& cc,
@@ -172,8 +187,8 @@ namespace anns_fhe
         const FHEConfig& config) const
     {
         const size_t current_level = ct_strided->GetLevel();
-        const int n_list = config.n_list; // 32
-        const int dim    = config.dimension; // 128
+        const int n_list = config.n_list;
+        const int dim    = config.dimension;
         const int slots  = config.poly_modulus_degree >> 1;
 
         Ciphertext<DCRTPoly> ct_compact;
@@ -214,9 +229,35 @@ namespace anns_fhe
         return ct_compact;
     }
 
+    std::vector<int> FHESearcher::select_clusters_interactive(
+        const FHEContextManager& ctx_mgr,
+        const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>& ct_compact_dists,
+        const FHEConfig& config) const
+    {
+        auto dec_dists = ctx_mgr.decrypt_vector(ct_compact_dists, config.n_list);
+
+        std::vector<std::pair<int, float>> dist_idx;
+        for (int i = 0; i < config.n_list; ++i) 
+        {
+            dist_idx.push_back({i, static_cast<float>(dec_dists[i])});
+        }
+
+        std::sort(dist_idx.begin(), dist_idx.end(), [](const auto& a, const auto& b) {
+            return a.second < b.second;
+        });
+
+        std::vector<int> selected_clusters;
+        for (int i = 0; i < config.n_probe && i < config.n_list; ++i) 
+        {
+            selected_clusters.push_back(dist_idx[i].first);
+        }
+
+        return selected_clusters;
+    }
+
     // ---------------------------------------------------------------------------
-    // Step 2: Top-n_probe Centroid Ranking (N=32 Pairwise Matrix)
-    // Depth: 3 + 7 levels (Chebyshev Sign deg 59) + 7 levels (Indicator deg 59) = 17 levels
+    // Step 2: Top-n_probe Centroid Ranking (n_list Pairwise Matrix)
+    // Depth consumed: 2 + (Chebyshev Sign) + 1 + (Indicator) -> check openfhe_stats::depth2degree()
     // ---------------------------------------------------------------------------
     Ciphertext<DCRTPoly> FHESearcher::rank_top_nprobe_centroids(
         const CryptoContext<DCRTPoly>& cc,
@@ -224,34 +265,34 @@ namespace anns_fhe
         double dist_bound,
         const FHEConfig& config) const
     {
-        const size_t N = static_cast<size_t>(config.n_list); // 32
+        const size_t N = static_cast<size_t>(config.n_list);
 
-        // Mazzone N=32 matrix re-encoding (0 mult depth)
-        // c_row has row i as [D_0, D_1, ..., D_31]
+        // Mazzone N=n_list matrix re-encoding (0 mult depth)
+        // c_row has row i as [D_0, D_1, ..., D_n_list]
         auto c_row       = anns_fhe::replicate_row(ct_compact_dists, N);
 
         // c_col_trans transposes row into column 0 (1 mult depth)
-        auto c_col_trans = anns_fhe::transpose_row(ct_compact_dists, N, true);
-        c_col_trans = cc->Rescale(c_col_trans);
+        auto c_col = anns_fhe::transpose_row(ct_compact_dists, N, true);
+        c_col = cc->Rescale(c_col);
 
-        // c_col replicates column 0 across all 32 columns (0 mult depth)
-        auto c_col       = anns_fhe::replicate_column(c_col_trans, N);
+        // c_col replicates column 0 across all n_list columns (0 mult depth)
+        c_col = anns_fhe::replicate_column(c_col, N);
 
         // Difference matrix: Δ_ij = D_i - D_j (0 mult depth)
-        auto ct_diff     = cc->EvalSub(c_row, c_col);
+        auto ct_diff = cc->EvalSub(c_row, c_col);
 
         // Scaling distances (1 mult depth)
         double B = 100.0; // the whole bandwidth of evaluation
-        double scale_factor = B / (dist_bound*0.6);
+        double scale_factor = B / dist_bound;
         std::vector<double> scale_vec((cc->GetRingDimension() >> 1), scale_factor);
         auto pt_scale = cc->MakeCKKSPackedPlaintext(scale_vec, 1, ct_compact_dists->GetLevel());
-        auto ct_diff_scaled = cc->EvalMult(ct_diff, pt_scale);
-        ct_diff_scaled = cc->Rescale(ct_diff_scaled);
+        ct_diff = cc->EvalMult(ct_diff, pt_scale);
+        ct_diff = cc->Rescale(ct_diff);
 
-        // 1. Evaluate ApproxSign(Δ_ij) (Degree 59, Depth 7)
-        uint32_t degree = openfhe_stats::depth2degree(7);
+        // 1. Evaluate ApproxSign(Δ_ij) (check openfhe_stats::depth2degree())
+        int degree = config.eval_sign_deg;
         double eps = 1.5 * (B/2) / degree;
-        auto S_ij = SignApproximator::eval_sign(cc, ct_diff_scaled, -B/2, B/2, degree, eps);
+        auto S_ij = SignApproximator::eval_sign(cc, ct_diff, -B/2, B/2, degree, eps);
 
         #ifdef ENABLE_LOGGING
         std::cout << "===== in rank_top_nprobe_centroids(), 1" << std::endl;
@@ -260,7 +301,7 @@ namespace anns_fhe
         #endif
 
         // 2. Sum across columns to compute rank vector R_i = Σ_j S_ij (1 mult depth)
-        auto ct_ranks    = anns_fhe::sum_rows(S_ij, N, true);
+        auto ct_ranks = anns_fhe::sum_rows(S_ij, N, true);
         ct_ranks = cc->Rescale(ct_ranks);
         ct_ranks = cc->EvalAdd(ct_ranks, 0.5);
 
@@ -271,19 +312,19 @@ namespace anns_fhe
         ctx_mgr_ptr->decrypt_and_print_vector(ct_ranks, "ct_ranks", config.n_list, true);
         #endif
 
-        // 3. Evaluate Top-n_probe indicator polynomial P_nprobe(R_i) (Degree 59, Depth 7)
-        // Dynamic n_probe threshold from config (1 to 4)
-        degree = openfhe_stats::depth2degree(7);
+        // 3. Evaluate Top-n_probe indicator polynomial P_nprobe(R_i) (check openfhe_stats::depth2degree())
+        // Dynamic n_probe threshold from config
+        degree = config.eval_indicator_deg;
         double threshold_min = 0.5;
         double threshold_max = static_cast<double>(config.n_probe) + 0.5;
-        auto M_cent = SignApproximator::eval_indicator(
-            cc, ct_ranks, threshold_min, threshold_max, 0.0, static_cast<double>(N), degree);
+        ct_ranks = SignApproximator::eval_indicator(
+            cc, ct_ranks, threshold_min, threshold_max, 0.0, static_cast<double>(N)+0.5, degree);
 
         #ifdef ENABLE_LOGGING
         std::cout << "===== in rank_top_nprobe_centroids(), 3" << std::endl;
         #endif
 
-        return M_cent;
+        return ct_ranks;
     }
 
     // ---------------------------------------------------------------------------
@@ -331,7 +372,7 @@ namespace anns_fhe
     // ct_query_dimpack has layout: slot[d*B+j] = q[d] for all j
     // pt_batch has layout: slot[d*B+j] = x_j_approx[d]
     // Result: slot[j] = ||q - x_j_approx||^2 for j = 0..B-1
-    // Depth consumed: 2 level
+    // Depth consumed: 1 level
     // ---------------------------------------------------------------------------
     Ciphertext<DCRTPoly> FHESearcher::compute_batch_distances_dimpack(
         const CryptoContext<DCRTPoly>& cc,
@@ -341,7 +382,7 @@ namespace anns_fhe
     {
         const int D     = config.dimension;
         const int slots = config.poly_modulus_degree >> 1;
-        const int B     = slots / D;  // 256
+        const int B     = slots / D;
 
         // Build plaintext batch in dimension-major layout
         std::vector<double> packed;
@@ -352,14 +393,19 @@ namespace anns_fhe
         auto ct_diff = cc->EvalSub(ct_query_dimpack, pt_batch);
 
         // Componentwise square  (1 mult depth)
-        auto ct_sq = cc->EvalMult(ct_diff, ct_diff);
-        ct_sq = cc->Rescale(ct_sq);
+        ct_diff = cc->EvalMult(ct_diff, ct_diff);
+        ct_diff = cc->Rescale(ct_diff);
 
-        // Tree reduction across D dimension blocks (1 mult depth)
-        ct_sq = anns_fhe::sum_rows(ct_sq, B, true);
-        ct_sq = cc->Rescale(ct_sq);
+        // Tree reduction across D dimension blocks (0 mult depth)
+        // stride = B, 2B, 4B, ..., (D/2)*B
+        // After reduction: slot[j] = sum_{d=0}^{D-1} (q[d] - x_j[d])^2
+        for (int stride = B; stride < D * B; stride *= 2)
+        {
+            auto rotated = cc->EvalRotate(ct_diff, stride);
+            ct_diff = cc->EvalAdd(ct_diff, rotated);
+        }
 
-        return ct_sq;
+        return ct_diff;
     }
 
     // ---------------------------------------------------------------------------
@@ -384,16 +430,16 @@ namespace anns_fhe
         }
 
         // ct_shifted = ct_dist - P  (plaintext subtraction, 0 mult depth)
-        auto ct_shifted = cc->EvalSub(ct_adjusted, penalty);
+        ct_adjusted = cc->EvalSub(ct_adjusted, penalty);
 
         // ct_masked = ct_shifted * ct_m_c  (1 mult depth)
-        auto ct_masked = cc->EvalMult(ct_shifted, ct_m_c_replicated);
-        ct_masked = cc->Rescale(ct_masked);
+        ct_adjusted = cc->EvalMult(ct_adjusted, ct_m_c_replicated);
+        ct_adjusted = cc->Rescale(ct_adjusted);
 
         // ct_final = ct_masked + P  (plaintext addition, 0 mult depth)
-        auto ct_final = cc->EvalAdd(ct_masked, penalty);
+        ct_adjusted = cc->EvalAdd(ct_adjusted, penalty);
 
-        return ct_final;
+        return ct_adjusted;
     }
 
 
@@ -412,10 +458,13 @@ namespace anns_fhe
 
         const auto& cc = ctx_mgr.get_context();
         const int slots = config.poly_modulus_degree >> 1;
-        const double dist_bound = 1.0e6;
+        const double dist_bound = 8.0e5;
         ctx_mgr_ptr = const_cast<anns_fhe::FHEContextManager*>(&ctx_mgr);
 
         // Encrypt query packed
+        m_p_centroids = &ctx_mgr.get_plaintext_centroids();
+        m_p_codebooks = &ctx_mgr.get_plaintext_codebooks();
+        
         auto ct_query = ctx_mgr.encrypt_query_packed(query, config);
 
         #ifdef ENABLE_LOGGING
@@ -426,143 +475,284 @@ namespace anns_fhe
         #endif
 
         // -----------------------------------------------------------------------
-        // Step 1: Coarse distance computation & compaction (Depth +2)
+        // Coarse distance computation & compaction (Depth +2)
         // -----------------------------------------------------------------------
-        auto ct_strided = compute_coarse_distances(
-            cc, ct_query, ctx_mgr.get_encrypted_centroids(), config);
+        auto t1 = t0;
+        lbcrypto::Ciphertext<lbcrypto::DCRTPoly> ct_compact;
 
-        #ifdef ENABLE_LOGGING
-        std::cout << "*** after compute_coarse_distances()" << std::endl;
-        std::cout << "Current Level: " << ct_strided->GetLevel() << std::endl;
-        std::cout << "Noise Scale Deg: " << ct_strided->GetNoiseScaleDeg() << std::endl;
-        #endif
-
-        auto ct_compact = compact_distances(cc, ct_strided, config);
-
-        #ifdef ENABLE_LOGGING
-        std::cout << "*** after compact_distances()" << std::endl;
-        std::cout << "Current Level: " << ct_compact->GetLevel() << std::endl;
-        std::cout << "Noise Scale Deg: " << ct_compact->GetNoiseScaleDeg() << std::endl;
-        #endif
-
-        if (stats) stats->level_coarse_dist = ct_compact->GetLevel();
-        auto t1 = std::chrono::high_resolution_clock::now();
-
-        #ifdef ENABLE_LOGGING
-        std::cout << "Step 1: Coarse distance computation & compaction done!" << std::endl;
-        std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0) << " ms" << std::endl;
-        ctx_mgr.decrypt_and_print_vector(ct_compact, "ct_compact", config.n_list, true);
-        std::cout << "--------------------------------------------------------------" << std::endl;
-        #endif
-
-        // -----------------------------------------------------------------------
-        // Step 2: Top-n_probe Centroid Ranking (N=32 Matrix, Depth +17)
-        // -----------------------------------------------------------------------
-        auto ct_mask_coarse = rank_top_nprobe_centroids(cc, ct_compact, dist_bound, config);
-
-        #ifdef ENABLE_LOGGING
-        std::cout << "*** after rank_top_nprobe_centroids()" << std::endl;
-        std::cout << "Current Level: " << ct_mask_coarse->GetLevel() << std::endl;
-        std::cout << "Noise Scale Deg: " << ct_mask_coarse->GetNoiseScaleDeg() << std::endl;
-        ctx_mgr.decrypt_and_print_vector(ct_mask_coarse, "ct_mask_coarse", config.n_list, true);
-        #endif
-        
-        if (stats) stats->level_coarse_rank = ct_mask_coarse->GetLevel();
-        auto t2 = std::chrono::high_resolution_clock::now();
-
-        #ifdef ENABLE_LOGGING
-        std::cout << "Step 2: Top-n_probe Centroid Ranking done!" << std::endl;
-        std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t2-t1) << " ms" << std::endl;
-        std::cout << "--------------------------------------------------------------" << std::endl;
-        #endif
-
-        // -----------------------------------------------------------------------
-        // Step 3: SIMD-batched ADC distance computation (Dimension-major packing)
-        // -----------------------------------------------------------------------
-        m_p_centroids = &ctx_mgr.get_plaintext_centroids();
-        m_p_codebooks = &ctx_mgr.get_plaintext_codebooks();
-
-        // Encrypt query in dimension-major layout for Step 3
-        auto ct_query_dimpack = ctx_mgr.encrypt_query_dimpack(query, config);
-
-        const int B = slots / config.dimension;  // 256
-        const double penalty = 1.0e6;
-
-        // Pre-extract per-cluster mask scalars from ct_mask_coarse
-        // ct_mask_coarse has m_c at slot c for c = 0..n_list-1
-        std::vector<Ciphertext<DCRTPoly>> ct_m_c_vec(config.n_list);
-        for (int c = 0; c < config.n_list; ++c)
+        if(config.interactive || config.add_penalty)
         {
-            // Extract scalar m_c from slot c
-            std::vector<double> mask_c(slots, 0.0);
-            mask_c[c] = 1.0;
-            auto pt_mask_c = cc->MakeCKKSPackedPlaintext(mask_c, 1, ct_mask_coarse->GetLevel());
-            auto ct_m_c_slot = cc->EvalMult(ct_mask_coarse, pt_mask_c);
-            ct_m_c_slot = cc->Rescale(ct_m_c_slot);
+            auto ct_strided = compute_coarse_distances(cc, ct_query, config);
 
-            // Shift slot c to slot 0
-            if (c != 0)
-                ct_m_c_slot = rotate(cc, ct_m_c_slot, c);
+            #ifdef ENABLE_LOGGING
+            std::cout << "*** after compute_coarse_distances()" << std::endl;
+            std::cout << "Current Level: " << ct_strided->GetLevel() << std::endl;
+            std::cout << "Noise Scale Deg: " << ct_strided->GetNoiseScaleDeg() << std::endl;
+            #endif
 
-            // Replicate scalar to B slots [0..B-1]
-            for (int stride = 1; stride < B; stride *= 2)
-            {
-                auto shifted = cc->EvalRotate(ct_m_c_slot, -stride);
-                ct_m_c_slot = cc->EvalAdd(ct_m_c_slot, shifted);
-            }
+            ct_compact = compact_distances(cc, ct_strided, config);
 
-            ct_m_c_vec[c] = ct_m_c_slot;
+            #ifdef ENABLE_LOGGING
+            std::cout << "*** after compact_distances()" << std::endl;
+            std::cout << "Current Level: " << ct_compact->GetLevel() << std::endl;
+            std::cout << "Noise Scale Deg: " << ct_compact->GetNoiseScaleDeg() << std::endl;
+            #endif
+
+            if (stats) stats->level_coarse_dist = ct_compact->GetLevel();
+            auto t1 = std::chrono::high_resolution_clock::now();
+
+            #ifdef ENABLE_LOGGING
+            std::cout << "### Coarse distance computation & compaction done!" << std::endl;
+            std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0) << " ms" << std::endl;
+            ctx_mgr.decrypt_and_print_vector(ct_compact, "ct_compact", config.n_list, true);
+            std::cout << "--------------------------------------------------------------" << std::endl;
+            #endif
         }
 
-        #ifdef ENABLE_LOGGING
-        std::cout << "Step 3: Pre-extracted " << config.n_list << " probe mask scalars." << std::endl;
-        #endif
-
-        // Process each cluster: compute distances, apply probe penalty
+        // -----------------------------------------------------------------------
+        // Interactive vs Sequential distance computation
+        // -----------------------------------------------------------------------
         std::vector<std::pair<int, float>> all_candidates;
         int final_mult_level = 0;
         int final_noise_degree = 0;
 
-        for (int c = 0; c < config.n_list; ++c)
-        {
-            const auto& c_vids = m_cluster_vector_ids[c];
-            if (c_vids.empty()) continue;
+        Ciphertext<DCRTPoly> ct_all_dists;
+        int global_offset = 0;
+        std::map<int, int> slot_to_vec_id;
 
-            // Process in batches of B
-            for (int batch_start = 0; batch_start < static_cast<int>(c_vids.size()); batch_start += B)
+        const int B = slots / config.dimension;
+        const double penalty = 1.0e6;
+
+        auto t2 = t1;
+        bool first_accum = true;
+
+        if (config.interactive)
+        {   
+            // -----------------------------------------------------------------------
+            // encryted, interactive mode
+            // -----------------------------------------------------------------------
+            auto selected_clusters = select_clusters_interactive(ctx_mgr, ct_compact, config);
+            t2 = std::chrono::high_resolution_clock::now();
+
+            #ifdef ENABLE_LOGGING
+            std::cout << "### Top-n_probe Centroid Selection done interactively!" << std::endl;
+            std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t2-t1) << " ms" << std::endl;
+            std::cout << "--------------------------------------------------------------" << std::endl;
+            #endif
+
+            auto ct_query_dimpack = ctx_mgr.encrypt_query_dimpack(query, config);
+
+            for (int c : selected_clusters)
             {
-                int batch_end = std::min(batch_start + B, static_cast<int>(c_vids.size()));
-                std::vector<int> batch_ids(c_vids.begin() + batch_start, c_vids.begin() + batch_end);
-                int batch_count = static_cast<int>(batch_ids.size());
+                const auto& c_vids = m_cluster_vector_ids[c];
+                if (c_vids.empty()) continue;
 
-                // Compute SIMD-batched distances (depth +2 from fresh query)
-                auto ct_dists = compute_batch_distances_dimpack(cc, ct_query_dimpack, batch_ids, config);
-
-                // Apply probe penalty mask (level-matches and multiplies by m_c) (depth +1)
-                auto ct_penalized = apply_probe_penalty(cc, ct_dists, ct_m_c_vec[c], penalty, config);
-
-                // Decrypt distances (client-side simulation)
-                auto dec_dists = ctx_mgr.decrypt_vector(ct_penalized, batch_count);
-                final_mult_level = ct_penalized->GetLevel();
-                final_noise_degree = ct_penalized->GetNoiseScaleDeg();
-
-                for (int j = 0; j < batch_count; ++j)
+                for (int batch_start = 0; batch_start < static_cast<int>(c_vids.size()); batch_start += B)
                 {
-                    all_candidates.emplace_back(batch_ids[j], static_cast<float>(dec_dists[j]));
+                    int batch_end = std::min(batch_start + B, static_cast<int>(c_vids.size()));
+                    std::vector<int> batch_ids(c_vids.begin() + batch_start, c_vids.begin() + batch_end);
+                    int batch_count = static_cast<int>(batch_ids.size());
+
+                    auto ct_dists = compute_batch_distances_dimpack(cc, ct_query_dimpack, batch_ids, config);
+
+                    std::vector<double> mask_batch(slots, 0.0);
+                    std::fill(mask_batch.begin(), mask_batch.begin() + c_vids.size(), 1.0);
+                    auto pt_mask_batch = cc->MakeCKKSPackedPlaintext(mask_batch, 1, ct_dists->GetLevel());
+                    auto ct_dists_batch = cc->EvalMult(ct_dists, pt_mask_batch);
+                    ct_dists_batch = cc->Rescale(ct_dists_batch);
+                    
+                    auto ct_shifted = rotate(cc, ct_dists_batch, -global_offset);
+                    
+                    if (first_accum) 
+                    {
+                        ct_all_dists = ct_shifted;
+                        first_accum = false;
+                    } 
+                    else 
+                    {
+                        ct_all_dists = cc->EvalAdd(ct_all_dists, ct_shifted);
+                    }
+
+                    for (int j = 0; j < batch_count; ++j) 
+                    {
+                        slot_to_vec_id[global_offset + j] = batch_ids[j];
+                    }
+                    global_offset += batch_count;
+                }
+            }
+        }
+        else if(config.add_penalty)
+        {
+            // -----------------------------------------------------------------------
+            // encryted, (non-interactive) full mode, adding penalty using coarse centroids
+            // -----------------------------------------------------------------------
+            std::vector<Ciphertext<DCRTPoly>> ct_m_c_vec;
+
+            auto ct_mask_coarse = rank_top_nprobe_centroids(cc, ct_compact, dist_bound, config);
+                
+            #ifdef ENABLE_LOGGING
+            std::cout << "*** after rank_top_nprobe_centroids()" << std::endl;
+            std::cout << "Current Level: " << ct_mask_coarse->GetLevel() << std::endl;
+            std::cout << "Noise Scale Deg: " << ct_mask_coarse->GetNoiseScaleDeg() << std::endl;
+            ctx_mgr.decrypt_and_print_vector(ct_mask_coarse, "ct_mask_coarse", config.n_list, true);
+            #endif
+            
+            if (stats) stats->level_coarse_rank = ct_mask_coarse->GetLevel();
+
+            t2 = std::chrono::high_resolution_clock::now();
+
+            #ifdef ENABLE_LOGGING
+            std::cout << "### Top-n_probe Centroid Ranking done!" << std::endl;
+            std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t2-t1) << " ms" << std::endl;
+            std::cout << "--------------------------------------------------------------" << std::endl;
+            #endif
+
+            ct_m_c_vec.resize(config.n_list);
+            for (int c = 0; c < config.n_list; ++c)
+            {
+                std::vector<double> mask_c(slots, 0.0);
+                mask_c[c] = 1.0;
+                auto pt_mask_c = cc->MakeCKKSPackedPlaintext(mask_c, 1, ct_mask_coarse->GetLevel());
+                auto ct_m_c_slot = cc->EvalMult(ct_mask_coarse, pt_mask_c);
+                ct_m_c_slot = cc->Rescale(ct_m_c_slot);
+
+                if (c != 0)
+                {
+                    ct_m_c_slot = rotate(cc, ct_m_c_slot, c);
                 }
 
+                for (int stride = 1; stride < B; stride *= 2)
+                {
+                    auto shifted = cc->EvalRotate(ct_m_c_slot, -stride);
+                    ct_m_c_slot = cc->EvalAdd(ct_m_c_slot, shifted);
+                }
+
+                ct_m_c_vec[c] = ct_m_c_slot;
+            }
+
+            auto ct_query_dimpack = ctx_mgr.encrypt_query_dimpack(query, config);
+
+            #ifdef ENABLE_LOGGING
+            std::cout << "### Pre-extracted " << config.n_list << " probe mask scalars." << std::endl;
+            #endif
+
+            for (int c = 0; c < config.n_list; ++c)
+            {
+                const auto& c_vids = m_cluster_vector_ids[c];
+                if (c_vids.empty()) continue;
+
+                for (int batch_start = 0; batch_start < static_cast<int>(c_vids.size()); batch_start += B)
+                {
+                    int batch_end = std::min(batch_start + B, static_cast<int>(c_vids.size()));
+                    std::vector<int> batch_ids(c_vids.begin() + batch_start, c_vids.begin() + batch_end);
+                    int batch_count = static_cast<int>(batch_ids.size());
+
+                    auto ct_dists = compute_batch_distances_dimpack(cc, ct_query_dimpack, batch_ids, config);
+                    lbcrypto::Ciphertext<lbcrypto::DCRTPoly> ct_shifted;
+
+                    auto ct_penalized = apply_probe_penalty(cc, ct_dists, ct_m_c_vec[c], penalty, config);
+
+                    std::vector<double> mask_batch(slots, 0.0);
+                    std::fill(mask_batch.begin(), mask_batch.begin() + batch_count, 1.0);
+                    auto pt_mask_batch = cc->MakeCKKSPackedPlaintext(mask_batch, 1, ct_penalized->GetLevel());
+                    auto ct_penalized_batch = cc->EvalMult(ct_penalized, pt_mask_batch);
+                    ct_penalized_batch = cc->Rescale(ct_penalized_batch);
+                    
+                    ct_shifted = rotate(cc, ct_penalized_batch, -global_offset);
+                    
+                    if (first_accum) 
+                    {
+                        ct_all_dists = ct_shifted;
+                        first_accum = false;
+                    } 
+                    else 
+                    {
+                        ct_all_dists = cc->EvalAdd(ct_all_dists, ct_shifted);
+                    }
+
+                    for (int j = 0; j < batch_count; ++j) 
+                    {
+                        slot_to_vec_id[global_offset + j] = batch_ids[j];
+                    }
+                    global_offset += batch_count;
+
+                    #ifdef ENABLE_LOGGING
+                    std::cout << "  Cluster " << c << " batch [" << batch_start << ".." << batch_end
+                            << ") processed (" << batch_count << " candidates)" << std::endl;
+                    #endif
+                }
+            }
+
+            if (stats && config.n_list > 0) stats->level_lut_dist = ct_all_dists->GetLevel();
+        }
+        else
+        {
+            // -----------------------------------------------------------------------
+            // encryted, (non-interactive) full mode, no coarse computation
+            // this is the nearest neighbor exact solution
+            // -----------------------------------------------------------------------
+
+            auto ct_query_dimpack = ctx_mgr.encrypt_query_dimpack(query, config);
+
+            for (int batch_start = 0; batch_start < m_num_vectors; batch_start += B)
+            {
+                int batch_end = std::min(batch_start + B, m_num_vectors);
+                int batch_count = batch_end - batch_start;
+                std::vector<int> batch_ids(batch_count);
+                std::iota(batch_ids.begin(), batch_ids.end(), batch_start);
+
+                auto ct_dists = compute_batch_distances_dimpack(cc, ct_query_dimpack, batch_ids, config);
+                lbcrypto::Ciphertext<lbcrypto::DCRTPoly> ct_shifted;
+
+                std::vector<double> mask_batch(slots, 0.0);
+                std::fill(mask_batch.begin(), mask_batch.begin() + batch_count, 1.0);
+
+                auto pt_mask_batch = cc->MakeCKKSPackedPlaintext(mask_batch, 1, ct_dists->GetLevel());
+                auto ct_dists_batch = cc->EvalMult(ct_dists, pt_mask_batch);
+                ct_dists_batch = cc->Rescale(ct_dists_batch);
+                
+                ct_shifted = rotate(cc, ct_dists_batch, -global_offset);
+                
+                if (first_accum) 
+                {
+                    ct_all_dists = ct_shifted;
+                    first_accum = false;
+                } 
+                else 
+                {
+                    ct_all_dists = cc->EvalAdd(ct_all_dists, ct_shifted);
+                }
+
+                for (int j = 0; j < batch_count; ++j) 
+                {
+                    slot_to_vec_id[global_offset + j] = batch_ids[j];
+                }
+                global_offset += batch_count;
+
                 #ifdef ENABLE_LOGGING
-                std::cout << "  Cluster " << c << " batch [" << batch_start << ".." << batch_end
-                          << ") processed (" << batch_count << " candidates)" << std::endl;
+                std::cout << " Batch [" << batch_start << ".." << batch_end
+                        << ") processed (" << batch_count << " candidates)" << std::endl;
                 #endif
+            }
+
+            if (stats && config.n_list > 0) stats->level_lut_dist = ct_all_dists->GetLevel();
+        }
+
+        if (!first_accum) 
+        {
+            auto dec_dists = ctx_mgr.decrypt_vector(ct_all_dists, global_offset);
+            final_mult_level = ct_all_dists->GetLevel();
+            final_noise_degree = ct_all_dists->GetNoiseScaleDeg();
+            for (int i = 0; i < global_offset; ++i) 
+            {
+                all_candidates.emplace_back(slot_to_vec_id[i], static_cast<float>(dec_dists[i]));
             }
         }
 
-        if (stats && !all_candidates.empty()) stats->level_lut_dist = ct_m_c_vec[0]->GetLevel();
         auto t3 = std::chrono::high_resolution_clock::now();
 
         #ifdef ENABLE_LOGGING
-        std::cout << "Step 3: SIMD-batched ADC distances + probe masking done!" << std::endl;
+        std::cout << "### Distance computation done!" << std::endl;
         std::cout << "Final Level: " << final_mult_level << std::endl;
         std::cout << "Noise Scale Deg: " << final_noise_degree << std::endl;
         std::cout << "Total candidates: " << all_candidates.size() << std::endl;
@@ -579,7 +769,7 @@ namespace anns_fhe
         std::vector<std::pair<int, float>> results;
         for (int i = 0; i < static_cast<int>(all_candidates.size()) && i < top_k; ++i)
         {
-            if (all_candidates[i].second < penalty * 0.5f)
+            if (config.interactive || (!config.add_penalty) || (all_candidates[i].second < penalty * 0.5f))
             {
                 results.push_back(all_candidates[i]);
             }
@@ -589,7 +779,7 @@ namespace anns_fhe
         auto t4 = std::chrono::high_resolution_clock::now();
 
         #ifdef ENABLE_LOGGING
-        std::cout << "Step 4: Client-side top-k selection done!" << std::endl;
+        std::cout << "### Client-side top-k selection done!" << std::endl;
         std::cout << "Selected " << results.size() << " results out of " << all_candidates.size() << " candidates" << std::endl;
         std::cout << "time = " << std::chrono::duration_cast<std::chrono::milliseconds>(t4-t3) << " ms" << std::endl;
         std::cout << "--------------------------------------------------------------" << std::endl;

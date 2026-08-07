@@ -40,23 +40,35 @@ std::vector<int32_t> FHEContextManager::compute_rotation_indices(const FHEConfig
     auto idx32 = anns_fhe::get_rotation_indices(32);
     idx.insert(idx32.begin(), idx32.end());
 
-    // 3. indices for sum_row() with batch_len
+    // 3. indices for tree reduction of batches
     const int batch_len = (config.poly_modulus_degree >> 1) / config.dimension;
-    std::vector<int32_t> idx_batch;
+    std::vector<int32_t> idx_batch_reduction;
     for (size_t i = 0; i < LOG2(batch_len); i++)
     {
         int32_t index = batch_len * (1 << i);
-        idx_batch.push_back(index);   // sumRows
+        idx_batch_reduction.push_back(index);
     }
-    idx.insert(idx_batch.begin(), idx_batch.end());
+    idx.insert(idx_batch_reduction.begin(), idx_batch_reduction.end());
+
+    // 4. indices for rotation of batches to pack all candid distances
+    // in non-interacive, full encryption mode, we need up to our dataset size
+    constexpr size_t dataset_size = 10'000;
+    std::vector<int32_t> idx_batch_rotation;
+    for (size_t i = 1; i < dataset_size; i<<=1)
+    {
+        idx_batch_rotation.push_back(-i);
+    }
+    idx.insert(idx_batch_rotation.begin(), idx_batch_rotation.end());
 
     #ifdef ENABLE_LOGGING
     printf("--------------- Rotation indices:\n accumulation reductions: ");
     for(auto idx_ : idx_acc) printf("%d, ", idx_);
     printf("\nindices for Coarse Centroids (N = 32): ");
     for(auto idx_ : idx32) printf("%d, ", idx_);
-    printf("\nindices for Batch Matrices: ");
-    for(auto idx_ : idx_batch) printf("%d, ", idx_);
+    printf("\nindices for Batch Matrices tree reduction: ");
+    for(auto idx_ : idx_batch_reduction) printf("%d, ", idx_);
+    printf("\nindices for Batch rotations to pack all candid distances: ");
+    for(auto idx_ : idx_batch_rotation) printf("%d, ", idx_);
     printf("\n---------------\n");
     #endif
 

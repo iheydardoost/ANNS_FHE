@@ -1,36 +1,49 @@
 # Accelerating Approximate Nearest Neighbor Search On Fully Homomorphic Encrypted Data (ANNS_FHE)
 
-This repository hosts the full implementation of the master's thesis project focused on accelerating Approximate Nearest Neighbor Search (ANNS) over Fully Homomorphic Encrypted (FHE) datasets using custom hardware architectures.
+This repository hosts the implementation of a master's thesis project focused on accelerating Approximate Nearest Neighbor Search (ANNS) over Fully Homomorphic Encrypted (FHE) datasets. The codebase currently features a comprehensive software-based reference model (Golden Model) that performs Inverted File with Product Quantization (IVF-PQ) and Asymmetric Distance Computation (ADC) over encrypted data using the OpenFHE library.
 
 ---
 
 ## 📂 Repository Structure
 
-The project is structured into modular subdirectories corresponding to the implementation milestones:
+The project is structured into modular subdirectories corresponding to the planned implementation milestones. Currently, the primary focus is on the software reference model.
 
-*   📁 **[`software_golden_model/`]**: Pure NumPy reference pipeline and OpenFHE C++ simulations. Serves as the golden model to generate test vectors.
-    *   📁 **[`software_golden_model/fhe_core/`]**: Source code for the high-performance C++ core implementation compiling to the core search binary.
-    *   📄 **[`software_golden_model/fhe_wrapper.py`]**: Python wrapper interfacing Python query workflows with the compiled C++ core binary.
-*   📁 **[`cpp_host_model/`]**: Host-side C++ runtime orchestration, pre-processing libraries, and CPU-offloading scheduling programs.
-*   📁 **[`hardware_fpga_model/`]**: Hardware RTL modules, Vitis High-Level Synthesis (HLS) kernels, testbenches, and Vivado simulation resources.
-*   📁 **[`integration_tools/`]**: Deployment configurations, automation scripts, and integration utilities for end-to-end execution.
+*   📁 **[`software_golden_model/`](./software_golden_model)**: The core implementation. Contains a Python pipeline for dataset preprocessing, model training, and quantization, alongside a high-performance OpenFHE C++ backend.
+    *   📁 **[`software_golden_model/fhe_core/`](./software_golden_model/fhe_core)**: Source code for the high-performance OpenFHE C++ backend compiled to the core executable (`fhe_core_bin`). It handles offline preprocessing, key generation, ciphertext index serialization, SIMD query packing, and homomorphic distance evaluation.
+    *   📄 **[`software_golden_model/main.py`](./software_golden_model/main.py)** & **[`fhe_wrapper.py`](./software_golden_model/fhe_wrapper.py)**: Python orchestrator and wrapper interfacing Python query workflows with the compiled C++ core binary.
+*   📁 **[`cpp_host_model/`](./cpp_host_model)**: *(Planned)* Host-side C++ runtime orchestration, pre-processing libraries, and CPU-offloading scheduling programs.
+*   📁 **[`hardware_fpga_model/`](./hardware_fpga_model)**: *(Planned)* Hardware RTL modules, Vitis High-Level Synthesis (HLS) kernels, testbenches, and Vivado simulation resources.
+*   📁 **[`integration_tools/`](./integration_tools)**: *(Planned)* Deployment configurations, automation scripts, and integration utilities for end-to-end execution.
 
 ---
 
-## 🐍 Milestone 1: Python & C++ Plaintext / FHE Golden Model
+## 🐍 Software Golden Model Overview
 
-The code in [`software_golden_model/`] implements a complete coarse-to-fine Inverted File with Product Quantization (IVF-PQ) indexing and search pipeline. It features Asymmetric Distance Computation (ADC) using correct mathematical query residuals to validate search recall against ground-truth benchmarks. The implementation is split into a Python reference pipeline and a high-performance C++ backend that supports both plaintext search and Fully Homomorphic Encrypted (FHE) search simulated with OpenFHE.
+The `software_golden_model` implements a complete coarse-to-fine IVF-PQ indexing and search pipeline. It features Asymmetric Distance Computation (ADC) to mathematically evaluate mathematically exact query residuals.
 
-### ⚙️ Compilation & Build Instructions (C++ Core)
+The underlying OpenFHE C++ core (`fhe_core`) is highly versatile and supports **4 distinct execution modes** configured via [`config.json`](./software_golden_model/config.json):
 
-To compile the C++ core execution binary:
+1.  **Plaintext Search Mode (`use_encryption: false`)**
+    Executes a fast CPU-based baseline search using IVF-PQ in plaintext. Uses thread-local pre-allocated memory buffers for optimal benchmarking.
+2.  **Encrypted Interactive Search (`use_encryption: true, interactive: true`)**
+    Executes an encrypted IVF search where the client interacts with the server. The server calculates coarse centroid distances, sends them to the client for decryption/selection, and the client sends back the selection mask to continue the ADC step on the server.
+3.  **Encrypted Exact Search (`use_encryption: true, interactive: false, add_penalty: false`)**
+    Bypasses the IVF cluster selection and computes full distances across the entire dataset. This behaves exactly like exact nearest neighbor search over FHE, yielding maximum recall at the cost of higher latency.
+4.  **Encrypted IVF with Penalty (`use_encryption: true, interactive: false, add_penalty: true`)**
+    Uses IVF to find the top $n_{\text{probe}}$ nearest coarse centroids securely on the server. To avoid revealing which clusters were probed, it adds a massive penalty to the distances of data points that do not belong to these probed centroids, effectively filtering them out homomorphically.
 
-#### Prerequisites
+---
+
+## ⚙️ Compilation & Build Instructions (C++ Core)
+
+To compile the C++ core execution binary (`fhe_core_bin`):
+
+### Prerequisites
 *   **Compiler Toolchain**: Clang or MinGW-w64 toolchain (configured and accessible on system `PATH`).
 *   **Build System**: CMake (version 3.12+).
-*   **OpenFHE Library**: Installed/built and available at `C:\OpenFHE`.
+*   **OpenFHE Library**: Installed, built, and accessible by CMake (e.g., at `C:\OpenFHE`).
 
-#### Step-by-Step Build Commands
+### Step-by-Step Build Commands
 Navigate to the core directory and build using CMake:
 ```powershell
 cd software_golden_model/fhe_core
@@ -39,170 +52,87 @@ cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
 ```
-This generates the C++ core binary (`fhe_core.exe` on Windows) which is used by the Python pipeline.
+This generates the C++ core binary (`fhe_core_bin.exe` on Windows / `fhe_core_bin` on Linux).
 
-### ⚙️ Installation & Configuration
+---
+
+## 📦 Installation & Configuration (Python Pipeline)
 
 1. Navigate into the golden model directory and ensure dependencies are installed:
    ```powershell
    cd software_golden_model
    pip install -r requirements.txt
    ```
+   *(Dependencies include `numpy`, `pandas`, `scikit-learn` (for K-Means), `matplotlib`, etc.)*
 
-2. Execution settings (dataset paths, cluster lists, subvector subdivisions, and encryption parameters) are configured inside [`config.json`].
+2. Execution settings (dataset paths, IVF/PQ hyper-parameters, and encryption configurations) are managed inside [`config.json`](./software_golden_model/config.json).
 
+### Key Parameters in `config.json`:
 ```json
 {
-    "project_root": "/path/to/ANNS_FHE",
-    "dataset": {
-        "path": "../dataset/siftsmall/siftsmall_base.fvecs",
-        "query_path": "../dataset/siftsmall/siftsmall_query.fvecs",
-        "groundtruth_path": "../dataset/siftsmall/siftsmall_groundtruth.ivecs",
-        "dimension": 128,
-        "models_output_dir": "../dataset/siftsmall_IVFPQ_models/",
-        "encoding_output_dir": "../dataset/siftsmall_IVFPQ_encoded/"
-    },
-    "ivf": {
-        "n_list": 32,
-        "max_iter": 100,
-        "seed": 42,
-        "tolerance": 1e-5
-    },
-    "pq": {
-        "m_subvectors": 8,
-        "k_subcentroids": 256,
-        "max_iter": 100,
-        "seed": 42,
-        "tolerance": 1e-5
-    },
     "encryption": {
         "enabled": true,
-        "use_encryption": true,
-        "poly_modulus_degree": 16384,
-        "scale_bits": 40,
-        "security_level": "HEStd_128_classic",
-        "n_probe": 2,
-        "interactive_top_k": true,
-        "sign_approx_method": "composition",
-        "composition_iterations": 3
+        "use_encryption": false,
+        "interactive": true,
+        "add_penalty": false,
+        "poly_modulus_degree": 65536,
+        "scale_bits": 45,
+        "n_probe": 1,
+        "eval_sign_deg": 247,
+        "eval_indicator_deg": 59,
+        "serialization_dir": "../dataset/siftsmall_fhe_keys/",
+        "ram_limit_gb": 32.0
     }
 }
 ```
-
-Key parameters inside [`config.json`]:
-*   `use_encryption` (under `encryption`): Activates or deactivates Fully Homomorphic Encryption (FHE) mode. If `false`, the pipeline runs in high-performance Plaintext mode.
-*   `n_probe` (under `encryption`): Controls the number of coarse clusters probed during IVF search.
-
----
-
-### 🗃️ Dynamic uint16 PQ Indices Support ($K_{\text{pq}} > 256$)
-
-To support larger and higher-precision Product Quantization codebooks where the number of subcentroids ($K_{\text{pq}}$ / `k_subcentroids`) exceeds $256$ (up to $65,535$), the pipeline automatically upgrades codebook indexing storage from 1-byte `uint8` to 2-byte `uint16`:
-*   **Python Encoder & Serialization**: Automatically resolves the required type based on $K_{\text{pq}}$ configuration. If $K_{\text{pq}} \le 256$, `pq_codes.bin` is serialized as `uint8` for storage efficiency; if $K_{\text{pq}} > 256$, it is written as `uint16`.
-*   **C++ Core Database Loader**: Inspects `k_subcentroids` inside `load_data()` to dynamically read the binary database index:
-    *   For $K_{\text{pq}} \le 256$: Reads file as 8-bit bytes and assigns them to the internal `uint16_t` C++ array.
-    *   For $K_{\text{pq}} > 256$: Reads 16-bit elements directly from the binary data stream.
-    *   This dynamic widening keeps all critical distance calculation kernels unified under a single type (`uint16_t`) with zero runtime conversion penalty.
+*   `use_encryption`, `interactive`, `add_penalty`: Toggles the 4 execution modes outlined above.
+*   `n_probe`: Controls the number of coarse clusters probed during IVF search.
+*   `poly_modulus_degree` & `scale_bits`: CKKS encryption parameters.
+*   `eval_sign_deg` & `eval_indicator_deg`: Polynomial degrees for homomorphic sign/comparison evaluation.
+*   `serialization_dir`: Target directory for storing/loading precomputed OpenFHE cryptocontexts, keys, and encrypted codebooks.
 
 ---
 
-### 🚀 Usage
+## 🚀 Basic Usage Workflow
 
-Execute the pipeline stages sequentially from the `software_golden_model/` directory using [`main.py`]:
+Execute the pipeline stages sequentially from the `software_golden_model/` directory using [`main.py`](./software_golden_model/main.py):
 
-#### 1. Train Codebooks & Coarse IVF Centroids
+### 1. Train Codebooks & Coarse IVF Centroids
 Clusters the base dataset into coarse partitions via K-Means and generates orthogonal subspace PQ codebooks on residual vectors:
 ```powershell
 python main.py create_models
 ```
 
-#### 2. Encode and Compress Dataset
-Assigns base vectors to closest coarse IVF centroids, calculates residual vectors, and quantizes the residuals into discrete 1-byte PQ indices:
+### 2. Encode and Compress Dataset
+Assigns base vectors to their closest coarse IVF centroids, calculates residual vectors, and quantizes the residuals into discrete PQ indices:
 ```powershell
 python main.py encode_dataset
 ```
 
-#### 3. Run Query Evaluation
-Executes Asymmetric Distance Computation (ADC) queries over the database, maps candidate indices to their coarse clusters, and validates Recall@K accuracy against ground truth:
+### 3. Offline FHE Preprocessing (Keygen & Index Encryption)
+Generates the OpenFHE `CryptoContext`, public/secret/evaluation keys, then encrypts the coarse centroids and PQ codebooks and serializes them:
 ```powershell
-python main.py test_query --top_k 8
+python main.py preprocess
 ```
 
-##### ⚙️ Query CLI Options
-The `test_query` command supports the following options:
-*   `--batch`: Activates batch processing mode, which processes all query vectors.
-*   `-j`, `--jobs <X>`: Specifies the parallel threads or subprocess worker count (default: `1`).
-*   `-n`, `--num_queries <Y>`: Limits the number of query tests to execute (default: `10`). Set to `-1` to run all queries.
+### 4. Run Query Evaluation
+Executes Asymmetric Distance Computation (ADC) queries over the database according to the mode set in `config.json`. Mapped candidates are compared against the ground truth to validate Recall@K:
+```powershell
+python main.py test_query --top_k 8 --batch -j 4
+```
+
+#### ⚙️ Query CLI Options
+*   `--batch`: Process all query vectors.
+*   `-j`, `--jobs <X>`: Specifies the parallel threads or worker count (default: `1`).
+*   `-n`, `--num_queries <Y>`: Limits the number of query tests to execute (default: `10`).
 *   `--top_k <K>`: Specifies the top-K nearest neighbors to retrieve (default: `8`).
----
-
-### 📊 Benchmarking & Analysis Scripts
-
-To run large-scale evaluations and analyze performance characteristics, the repository includes three automation and plotting scripts under the `software_golden_model/` directory:
-
-#### 1. Parameter Sweep Sweep-runner (`run_experiments.py`)
-This script automates testing the plaintext pipeline across a wide variety of parameter combinations to find optimal configurations.
-* **Mechanism**: It iterates through combinations of IVF clusters ($n_{list}$), PQ subvectors ($M$), and subcentroids ($K_{pq}$). It dynamically updates `config.json`, runs model training, encodes the dataset, and tests queries across multiple `Top-K` values.
-* **Execution**:
-  ```powershell
-  python run_experiments.py
-  ```
-* **Output**: Writes all recall metrics (mean, std, min, max) to a CSV results file (`results/siftsmall_ivfpq_experiment_results.csv`).
-
-#### 2. Plaintext Experiment Analyzer (`analyze_results.py`)
-This script processes the CSV data generated by the parameter sweep.
-* **Mechanism**: It loads the results CSV, computes the vector storage footprint and mathematical dataset compression ratio for each combination, prints out the top configurations ranked by recall, and generates comparative plots.
-* **Execution**:
-  ```powershell
-  python analyze_results.py
-  ```
-* **Output**: Generates and saves three PNG graphs showing Plaintext Recall vs. Top-K as functions of $n_{list}$, $M$, and $K_{pq}$ respectively.
-
-#### 3. Plaintext vs. FHE Benchmarker (`run_fhe_benchmarks.py`)
-This script runs side-by-side performance comparisons of the plaintext search versus the Fully Homomorphic Encrypted (FHE) search.
-* **Mechanism**:
-  1. Disables encryption and runs plaintext queries across the full query set to gather baseline latency and recall stats.
-  2. Enables encryption and runs parallel FHE query subprocesses over a sample query batch (e.g., 10 queries, to keep runtime under 5 minutes) for multiple configurations of $n_{probe} \in \{1, 2, 4\}$ and $Top-K \in \{1, 2, 4, 8\}$.
-* **Execution**:
-  ```powershell
-  python run_fhe_benchmarks.py
-  ```
-* **Output**: 
-  * Generates `results/fhe_experiment_summary.json` containing raw latency and recall data.
-  * Plots a Recall@K comparison line graph comparing plaintext and FHE (showing exact numerical equivalence).
-  * Plots a Query Latency bar chart (seconds per query, on log scale) highlighting the computational FHE overhead on the CPU.
 
 ---
 
-### 🔀 Query Parallelization Behavior
+## 📊 Benchmarking & Analysis Scripts
 
-The pipeline employs a unified, high-performance C++ parallel query execution strategy optimized for both Plaintext and FHE search modes inside a single process:
+To run large-scale evaluations, the repository includes automation and plotting scripts under the `software_golden_model/` directory:
 
-*   **Unified C++ Thread Pool**: Spawns a dedicated C++ thread pool with `j` worker threads inside a single running `fhe_core` process. This avoids subprocess spawning overhead and processes queries in parallel.
-*   **Lock-Free Atomic Work-Sharing**: Utilizes a lock-free `std::atomic<int>` query counter to dynamically distribute queries across threads. This minimizes task scheduling overhead to a few nanoseconds and provides perfect load balancing.
-*   **Asynchronous Output Buffering**: Query results and timings are buffered in memory and printed sequentially in sorted order by the main thread after execution, avoiding console I/O mutex contention on the hot path.
-*   **OpenMP Thread Limit**: Restricts internal OpenMP threads inside OpenFHE/Eigen to `1` thread per worker (via `omp_set_num_threads(1)`). This avoids CPU over-subscription and allocator lock bottlenecks, enabling efficient parallel scaling.
-*   **Allocation-Free Plaintext Search**: Utilizes pre-allocated thread-local scratch vectors (`PlaintextScratch`) for plaintext search. Large memory structures (like distance lookup tables) are allocated once at thread startup and reused across queries, eliminating heap-allocator locking.
-
----
-
-### ⚠️ FHE Memory Footprint Warning & Safety Guard
-
-*   **Memory Overhead**: Fully Homomorphic Encryption operations under CKKS are extremely memory-intensive. Each active search thread instantiates its own OpenFHE cryptocontext, public/evaluation keys, and ciphertext arrays.
-*   **OOM Scaling Math**: The memory footprint of the Query Distance Lookup Table (LUT) scales dynamically with the number of probed clusters ($n_{\text{probe}}$), subspace count ($M$), and subcentroids count ($K_{\text{pq}}$):
-    $$\text{Ciphertexts Count} = n_{\text{probe}} \times M \times K_{\text{pq}}$$
-    At $N=16384$ ring dimension, each ciphertext consumes $\approx 2 \text{ MB}$. For $M=8$:
-    *   If $K_{\text{pq}}=256$: Each coarse probe consumes $\approx 4 \text{ GB}$ of RAM. Probing 32 clusters requires $128 \text{ GB}$ of RAM.
-    *   If $K_{\text{pq}}=1024$: Each coarse probe consumes $\approx 16 \text{ GB}$ of RAM. Probing just 2 clusters requires $32 \text{ GB}$ of RAM.
-*   **Dynamic Safety Guard**: To prevent the host system from lock-ups or kernel OOM crashes, a dynamic safety check is enforced in `main.cpp` that calculates the estimated memory consumption before running homomorphic queries:
-    $$\text{Memory (GB)} = \frac{n_{\text{probe}} \times M \times K_{\text{pq}} \times 2.0}{1024.0}$$
-    If the estimated memory footprint exceeds **32.0 GB**, the C++ core terminates immediately with an informative error message.
-
----
-
-## 🛡️ Validation & Diagnostics
-
-The search engine prints diagnostic statistics on execution:
-- Average Recall@K across all query vectors.
-- Standard deviation, minimum, and maximum recall bounds.
-- Nearest neighbors comparison logs (True indices vs. predicted indices) for query diagnostic inspections.
+*   **`run_experiments.py`**: Automates testing the pipeline across a wide variety of parameter combinations ($n_{\text{list}}$, $M$, $K_{\text{pq}}$) to find optimal configurations.
+*   **`analyze_results.py`**: Processes the CSV data generated by the parameter sweep and generates visualization plots (Recall vs. Top-K).
+*   **`run_fhe_benchmarks.py`**: Runs side-by-side performance comparisons of Plaintext search versus Fully Homomorphic Encrypted (FHE) search, validating mathematical correctness and highlighting computational overhead.

@@ -123,9 +123,8 @@ static void print_latency(double coarse_ms, double fine_ms, int query_idx)
 // ---------------------------------------------------------------------------
 static int mode_preprocess(const FHEConfig& config)
 {
-    std::cout << "\n=== FHE-Core Preprocessing (" << config.pipeline_mode << ") ===" << std::endl;
-    std::cout << "Pipeline Mode=" << config.pipeline_mode
-              << "  Depth=" << config.multiplicative_depth
+    std::cout << "\n=== FHE-Core Preprocessing ===" << std::endl;
+    std::cout << "  Depth=" << config.multiplicative_depth
               << "  Slots=" << (config.poly_modulus_degree >> 1)
               << "  n_list=" << config.n_list
               << "  M=" << config.m_subvectors
@@ -180,7 +179,7 @@ static int mode_search_fhe(
     int jobs,
     int limit)
 {
-    std::cout << "\n=== FHE-Core Encrypted Search (" << config.pipeline_mode << ") ===" << std::endl;
+    std::cout << "\n=== FHE-Core Encrypted Search ===" << std::endl;
 
     // --- Load CryptoContext + keys + encrypted index ---
     FHEContextManager ctx_mgr;
