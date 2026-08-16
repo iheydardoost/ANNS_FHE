@@ -4,14 +4,16 @@ project(fhe_interactive_sim CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(DEFINED ENV{VITIS25})
+if(DEFINED ENV{VITIS_HLS_INCLUDE})
+    set(VITIS_INC "$ENV{VITIS_HLS_INCLUDE}")
+elseif(DEFINED ENV{VITIS25})
     set(VITIS_INC "$ENV{VITIS25}/include")
-else()
+elseif(EXISTS "D:/AMDDesignTools/2025.2/Vitis/include")
     set(VITIS_INC "D:/AMDDesignTools/2025.2/Vitis/include")
 endif()
 
 include_directories(
-    include
+    src
     ../hardware_fpga_model/hls/src
     ${VITIS_INC}
 )

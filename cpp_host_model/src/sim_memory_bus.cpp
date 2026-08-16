@@ -1,4 +1,4 @@
-#include "../include/sim_memory_bus.h"
+#include "sim_memory_bus.h"
 #include <fstream>
 #include <iostream>
 

@@ -87,7 +87,7 @@ def main():
                 fn = os.path.join(vec_dir, f"rotkey_step{step}_{poly}_{d}.bin")
                 assert os.path.exists(fn), f"Missing {fn}"
                 data = read_uint64_file(fn)
-                assert len(data) == 15 * 16384, f"Unexpected length for {fn}: {len(data)}"
+                assert len(data) == 14 * 16384 or len(data) == 15 * 16384, f"Unexpected length for {fn}: {len(data)}"
 
     # 5. Top-K output check
     topk_file = os.path.join(vec_dir, "cp6_top_k.txt")

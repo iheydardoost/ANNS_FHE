@@ -5,21 +5,20 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Configure OpenFHE directory
-set(OpenFHE_DIR "C:/OpenFHE/CMake")
+if(NOT DEFINED OpenFHE_DIR)
+    if(DEFINED ENV{OpenFHE_DIR})
+        set(OpenFHE_DIR "$ENV{OpenFHE_DIR}")
+    elseif(EXISTS "C:/OpenFHE/CMake")
+        set(OpenFHE_DIR "C:/OpenFHE/CMake")
+    endif()
+endif()
 find_package(OpenFHE REQUIRED)
 
-set(OpenFHE_INCLUDE_DIRS
-    "C:/OpenFHE/include"
-    "C:/OpenFHE/include/openfhe"
-    "C:/OpenFHE/include/openfhe/core"
-    "C:/OpenFHE/include/openfhe/pke"
-    "C:/OpenFHE/include/openfhe/binfhe"
-    "C:/OpenFHE/include/openfhe/cereal"
-)
-
-if(DEFINED ENV{VITIS25})
+if(DEFINED ENV{VITIS_HLS_INCLUDE})
+    set(VITIS_INC "$ENV{VITIS_HLS_INCLUDE}")
+elseif(DEFINED ENV{VITIS25})
     set(VITIS_INC "$ENV{VITIS25}/include")
-else()
+elseif(EXISTS "D:/AMDDesignTools/2025.2/Vitis/include")
     set(VITIS_INC "D:/AMDDesignTools/2025.2/Vitis/include")
 endif()
 

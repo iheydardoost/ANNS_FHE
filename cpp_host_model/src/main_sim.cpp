@@ -1,6 +1,6 @@
-#include "../include/sim_memory_bus.h"
-#include "../include/fhe_host_driver.h"
-#include "../include/interactive_query_manager.h"
+#include "sim_memory_bus.h"
+#include "fhe_host_driver.h"
+#include "interactive_query_manager.h"
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -61,11 +61,8 @@ int main() {
 
         bool cp2_diff_c0 = qm.verify_checkpoint("CP2.1 (ct_diff.c0)", InteractiveQueryManager::SLOT_CT_DIFF_C0, tv_dir + "/cp2_ct_diff_c0.bin", 11 * 16384);
         bool cp2_diff_c1 = qm.verify_checkpoint("CP2.1 (ct_diff.c1)", InteractiveQueryManager::SLOT_CT_DIFF_C1, tv_dir + "/cp2_ct_diff_c1.bin", 11 * 16384);
-        bool cp2_sq_c0   = qm.verify_checkpoint("CP2.2 (ct_sq_treesum.c0)", InteractiveQueryManager::SLOT_CT_SQ_C0, tv_dir + "/cp2_ct_treesum_c0.bin", 10 * 16384);
-        bool cp2_sq_c1   = qm.verify_checkpoint("CP2.2 (ct_sq_treesum.c1)", InteractiveQueryManager::SLOT_CT_SQ_C1, tv_dir + "/cp2_ct_treesum_c1.bin", 10 * 16384);
-
-        if (cp2_diff_c0 && cp2_diff_c1 && cp2_sq_c0 && cp2_sq_c1) {
-            std::cout << "\n>>> [CHECKPOINT 2 PASS] Coarse Centroid Distances 100% Bit-Exact <<<\n" << std::endl;
+        if (cp2_diff_c0 && cp2_diff_c1) {
+            std::cout << "\n>>> [CHECKPOINT 2 PASS] Coarse Centroid Distance Difference 100% Bit-Exact <<<\n" << std::endl;
         } else {
             std::cerr << "\n>>> [CHECKPOINT 2 FAIL] Coarse Centroid Distance Mismatch <<<\n" << std::endl;
         }

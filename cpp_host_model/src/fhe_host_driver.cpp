@@ -1,5 +1,5 @@
-#include "../include/fhe_host_driver.h"
-#include "../../hardware_fpga_model/hls/src/fhe_accel_top.h"
+#include "fhe_host_driver.h"
+#include "fhe_accel_top.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>

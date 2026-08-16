@@ -1,4 +1,4 @@
-#include "../include/interactive_query_manager.h"
+#include "interactive_query_manager.h"
 #include <iostream>
 #include <fstream>
 #include <cmath>

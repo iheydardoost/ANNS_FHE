@@ -44,7 +44,7 @@ graph TD
 Wraps virtual DRAM buffers and manages 512-bit beat packing/unpacking:
 
 ```cpp
-// cpp_host_model/include/sim_memory_bus.h
+// cpp_host_model/src/sim_memory_bus.h
 #pragma once
 #include <vector>
 #include <cstdint>
@@ -78,7 +78,7 @@ private:
 Translates high-level FHE expressions into sequences of `fhe_accel_top()` invocations:
 
 ```cpp
-// cpp_host_model/include/fhe_host_driver.h
+// cpp_host_model/src/fhe_host_driver.h
 #pragma once
 #include "sim_memory_bus.h"
 #include <cstdint>
@@ -186,7 +186,7 @@ void FHEHostDriver::eval_mult_relin_rescale(
 Executes the entire lifecycle of an interactive IVF-PQ query:
 
 ```cpp
-// cpp_host_model/include/interactive_query_manager.h
+// cpp_host_model/src/interactive_query_manager.h
 #pragma once
 #include "fhe_host_driver.h"
 #include <vector>
